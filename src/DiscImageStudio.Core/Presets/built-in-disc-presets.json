@@ -149,6 +149,21 @@
       "contributor": "bczhc"
     },
     {
+      "id": "cmc-dvd-r-cmdr47c",
+      "displayName": "中环 DVD-R CMDR47C系列（实测）",
+      "description": "中环 DVD-R CMDR47C系列实测标定参数：23.9662488720–57.9544864004 mm，共 2,297,888 个扇区；采用三次轨距分布。",
+      "totalSectors": 2297888,
+      "innerRadiusMm": 23.96624887200203,
+      "outerRadiusMm": 57.95448640041542,
+      "channelBitLengthNm": 133.3,
+      "pitchLinear": -2.969075269299882E-05,
+      "pitchQuadratic": 2.5435133941883117E-05,
+      "pitchCubic": -5.338539693479462E-06,
+      "displayNameResourceKey": "DiscPreset_CmcDvdRCmdr47c_DisplayName",
+      "descriptionResourceKey": "DiscPreset_CmcDvdRCmdr47c_Description",
+      "contributor": "hatsuyuki280"
+    },
+    {
       "id": "dvd-5-80mm",
       "displayName": "标准 8cm 单层 DVD",
       "description": "ISO/IEC 16448 标准单层 80 mm DVD 数据区：24–38 mm，共 714,544 个扇区。",
