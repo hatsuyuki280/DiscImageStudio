@@ -17,6 +17,7 @@ internal static class ProjectSession
         string inner = Format(geometry.InnerRadiusMm);
         string outer = Format(geometry.OuterRadiusMm);
         string sectors = geometry.Sectors.ToString(CultureInfo.InvariantCulture);
+        string usable = geometry.UsableSectors?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
 
         ToneProfile tone = (document.Tone ?? ToneProfile.LegacyBinary).Normalized();
         if (document.Family is OpticalDiscFamily.Dvd or OpticalDiscFamily.BluRay
@@ -29,6 +30,7 @@ internal static class ProjectSession
         state.ToneLevels = tone.Levels;
         state.ToneBrightness = tone.Brightness;
         state.ToneSrgbLinearization = tone.SrgbLinearization;
+        state.DvdReadCompatibility = document.IsDvd && outputs.DvdReadCompatibility;
 
         switch (document.Family)
         {
@@ -36,6 +38,7 @@ internal static class ProjectSession
                 state.DvdInnerRadius = inner;
                 state.DvdOuterRadius = outer;
                 state.DvdTotalSectors = sectors;
+                state.DvdUsableSectors = usable;
                 state.DvdPitchLinear = Format(geometry.PitchLinear);
                 state.DvdPitchQuadratic = Format(geometry.PitchQuadratic);
                 state.DvdPitchCubic = Format(geometry.PitchCubic);
@@ -56,6 +59,7 @@ internal static class ProjectSession
                 state.BdInnerRadius = inner;
                 state.BdOuterRadius = outer;
                 state.BdTotalSectors = sectors;
+                state.BdUsableSectors = usable;
                 state.BdActualInnerRadius = inner;
                 state.BdActualOuterRadius = outer;
                 state.BdPitchLinear = state.BdActualPitchLinear = Format(geometry.PitchLinear);
@@ -74,6 +78,7 @@ internal static class ProjectSession
                 state.CdInnerRadius = inner;
                 state.CdOuterRadius = outer;
                 state.CdSectors = sectors;
+                state.CdUsableSectors = usable;
                 state.CdActualInnerRadius = inner;
                 state.CdActualOuterRadius = outer;
                 state.CdPitchLinear = state.CdActualPitchLinear = Format(geometry.PitchLinear);
@@ -102,7 +107,8 @@ internal static class ProjectSession
                     ParameterParser.ParsePositiveLong(state.DvdTotalSectors, L.T("DVD 总扇区数")),
                     ParameterParser.ParseDouble(state.DvdPitchLinear, L.T("DVD 相对一次项")),
                     ParameterParser.ParseDouble(state.DvdPitchQuadratic, L.T("DVD 相对二次项")),
-                    ParameterParser.ParseDouble(state.DvdPitchCubic, L.T("DVD 相对三次项")));
+                    ParameterParser.ParseDouble(state.DvdPitchCubic, L.T("DVD 相对三次项")),
+                    UsableSectors: state.GetUsableSectors(current.Family));
             case OpticalDiscFamily.BluRay:
                 return new ProjectGeometry(
                     ParameterParser.ParsePositiveDouble(state.BdInnerRadius, L.T("蓝光内半径")),
@@ -110,7 +116,8 @@ internal static class ProjectSession
                     ParameterParser.ParsePositiveLong(state.BdTotalSectors, L.T("蓝光总扇区数")),
                     ParameterParser.ParseDouble(state.BdPitchLinear, L.T("相对一次项")),
                     ParameterParser.ParseDouble(state.BdPitchQuadratic, L.T("相对二次项")),
-                    ParameterParser.ParseDouble(state.BdPitchCubic, L.T("相对三次项")));
+                    ParameterParser.ParseDouble(state.BdPitchCubic, L.T("相对三次项")),
+                    UsableSectors: state.GetUsableSectors(current.Family));
             default:
                 return new ProjectGeometry(
                     ParameterParser.ParsePositiveDouble(state.CdInnerRadius, L.T("CD 内半径")),
@@ -118,7 +125,8 @@ internal static class ProjectSession
                     ParameterParser.ParsePositiveLong(state.CdSectors, L.T("CD 扇区数")),
                     ParameterParser.ParseDouble(state.CdPitchLinear, L.T("相对一次项")),
                     ParameterParser.ParseDouble(state.CdPitchQuadratic, L.T("相对二次项")),
-                    ParameterParser.ParseDouble(state.CdPitchCubic, L.T("相对三次项")));
+                    ParameterParser.ParseDouble(state.CdPitchCubic, L.T("相对三次项")),
+                    UsableSectors: state.GetUsableSectors(current.Family));
         }
     }
 
@@ -133,7 +141,8 @@ internal static class ProjectSession
                     state.DvdDataDirectory,
                     state.DvdVolumeLabel,
                     Interleave: false,
-                    FilesAtOuterRing: state.DvdFilesAtOuterRing);
+                    FilesAtOuterRing: state.DvdFilesAtOuterRing,
+                    DvdReadCompatibility: state.DvdReadCompatibility);
             case OpticalDiscFamily.BluRay:
                 return new ProjectOutputs(
                     RequireOutput(state.BdOutputPath, L.T("蓝光 ISO 输出位置")),

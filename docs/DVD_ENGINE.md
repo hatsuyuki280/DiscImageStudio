@@ -5,7 +5,7 @@
 固定约定：
 
 - 单层盘片 Data Zone，Sector Information 为 `0x00`；
-- DVD-R Data Frame 的 RSV 为六个 `0x00`；
+- DVD-R Data Frame 的 RSV 使用未指定应用含义时的默认值：六个 `0x00`；
 - 只输入 ECC Block 的初始 LBA，后续扇区自动使用 `LBA + 1 ... LBA + 15`；
 - `PSN = PSN offset + LBA`，默认 offset 为 `0x30000`；
 - DSV 绝对值相等时选择 Stream 1；
@@ -14,7 +14,25 @@
 
 编码链包括 ID、IED、全零 RSV、EDC、数据扰码、RS-PC PO/PI、PO 行交织、EFMPlus 主表/替代表、SYNC/DSV 控制和 NRZI 转换。
 
+SYNC 码表以 [ECMA-267 第三版 Table 4（印刷页码 30）](https://ecma-international.org/wp-content/uploads/ECMA-267_3rd_edition_april_2001.pdf#page=40) 为准。状态 3/4 的副 SY6 为 `0x80440011`；旧模型误写为 `0x90440011`，后者是该状态组的主 SY2。此修正作用于精确编码、码字评分和前缀状态的 DSV/电平回放；fast ISO、流式刻录及标定图案的 payload 生成不经过 SYNC 编码，因此输出不变。#90 的 DVD 读盘兼容性处理需另行验证。
+
 独立[灰阶实验工具](../tools/DvdGrayProbe/README.md)使用 `FastDispersionImageWriter.WriteScrambledCodewordPatternStream`，在同一 payload 码字中心坐标系下直接指定扰码 Q，再写出 `P = Q XOR mask`。该接口不经过固定灰度分档，适合测试 `64/E4` 等候选码字和离散抖动图集；普通图片生成的调色板不受影响。快速生成不回放全盘 ECC/EFM，也不预测光学亮度。回归测试对混合码字执行完整 ECC/EFM 小样本回放，另验证实际 payload、几何、并行一致性和取消。
+
+## DVD 读取兼容性（实验性） / DVD read compatibility (experimental)
+
+针对 [#90](https://github.com/JiaFeiMiao-K-Cat/DiscImageStudio/issues/90)，提供默认关闭的实验性输出选项；GUI 在 DVD 导出、流式刻录及标定标靶设置中提供，CLI 使用 `--read-compatibility true`（仅支持 fast dispersion）。工程仍只保存开启／关闭选项，不增加配方档位；开启时使用 `periodic-9b-16-v1`。它只改写属于绘图的 payload，不改变文件系统、文件内容、透明度阈值排除的字节或绘图范围之外的字节。
+
+新规则依据 [bczhc 的 every16 实现](https://github.com/bczhc/dvd-tools/blob/master/src/bin/dvd-guard-every16.rs)：每个 2048-byte 扇区在固定偏移 `0, 16, …, 2032` 检查原始扰码域 `Q = payload XOR mask(PSN)`；只有 `owned && Q != A5 && Q != 9B` 才将 Q 改为 `9B`，并写回 `payload = 9B XOR mask(PSN)`。生成器额外使用逐字节归属信息保护非绘图内容。已有 `9B` 不重复计数，黑色 `A5` 保持不变；常规绘图的 owned 字节仅为 `A5/92`，因此实际改写的是选中位置的白色 `92`。完全归属于绘图的纯白扇区改变 128 字节，即 6.25%。周期固定在扇区偏移上，不受白色段起点、输入分块或并行 worker 数量影响；不叠加旧版段首 bridge，也不使用原来的 64-byte／58-byte 窗口条件。刻录机仍负责 EDC、ECC 和物理调制。
+
+普通 ISO、流式图片、解析图案、宽地址环带和固定参考图共用新规则；精确指定 Q 的实验 API 拒绝该选项以保留实验输入。新输出的 sidecar 记录 `readCompatibility: "periodic-9b-16-v1"` 与实际 `compatibilityChanges`；关闭时为 `"off"` 和 0。读回预览继续识别旧 `bridge-9b-v1` sidecar，并对两种已知配方将保护用的 `9B` 显示为原来的白色意图；这不是保护字节的光学亮度预测。缺失或未知版本沿用原分类。开启后不再声称 transition-class error 为零，未经全编码回放的分数为 null。
+
+标定记录冻结生成标靶时的开关和配方：新建且开启保护的标靶保存 `periodic-9b-16-v1`；旧记录若没有配方字段但已开启保护，继续按 `bridge-9b-v1` 复现原标靶。该旧算法仅为已有标靶复现保留，不在普通工程输出中提供新档位。原本关闭或没有开启标记的记录仍关闭；如需采用新规则，应创建新标靶，不能用升级后的规则悄悄重写既有标靶。
+
+[#90 的实盘反馈](https://github.com/JiaFeiMiao-K-Cat/DiscImageStudio/issues/90#issuecomment-6693099737) 报告：未经处理的镜像起始即出现 medium error，采用每 16 字节替换或另一种段首方案后均能完整读回。这支持在该测试环境采用新规则，不代表所有盘片和光驱均已解决；该反馈使用外部脚本，也不能替代本程序 ownership 与集成路径的验证。盘面纹理和对比度可能变化，需继续比较关闭／开启后的画面、全盘读回与读速，并记录盘片 MID、刻录机／读取机型号、固件及倍速。SY6/EDC 模型修正与这个 payload 缓解措施属于不同层面；CD 和 BD 的编码与输出保持不变。
+
+English: the experimental option remains off by default, with no additional GUI recipe selector. Enabled project output uses `periodic-9b-16-v1`: at sector offsets `0, 16, …, 2032`, replace the original scrambled Q with `9B` only when the byte is owned by drawing and Q is neither `A5` nor an existing `9B`. Normal owned drawing bytes are `A5/92`; an entirely owned white sector therefore changes 128 bytes (6.25%). Files, alpha-excluded bytes and bytes outside the drawing range remain untouched. Positions do not depend on white-run starts, chunking or worker count. The old run-start bridge is not added, and exact-Q experiments still reject the option.
+
+New sidecars record `periodic-9b-16-v1` and the actual change count. Readback previews continue to recognize `bridge-9b-v1` as well, showing intended white without predicting optical equivalence. New protected calibration targets save the periodic recipe; legacy enabled targets without a recipe field retain the old bridge solely to reproduce their original output. Disabled legacy targets stay disabled. Create a new target to adopt the new recipe. The linked #90 report describes successful full-disc reads after external-script treatment where untreated input failed, not universal drive/media support or a validation of this application's integration. Texture and contrast may change. CD and BD are unchanged.
 
 ## 构建和自检
 
@@ -27,8 +45,10 @@ dotnet run --project src/DvdImageSolver --configuration Release -- selftest
 
 自检覆盖：
 
-- ECMA-267 调制表抽样；
+- ECMA-267 调制表抽样及 Table 4 全部主/副 SYNC 标准向量（覆盖状态 1–4）；
+- 状态 3/4 实际选中副 SY6 的 NRZI 输出、码字评分边界及两种初始电平下的前缀 DSV；
 - ID、IED、RSV 和 EDC；
+- EDC 最小向量、零值/递增/全 FF payload 的完整数据帧向量，以及独立多项式长除法的整帧零余数；
 - 扰码异或往返；
 - 208 行 PI 与 172 列 PO 的零余数；
 - 619008 个物理 NRZI 电平的数量、确定性和 RLL(2,10) 数据游程；
@@ -40,6 +60,27 @@ dotnet run --project src/DvdImageSolver --configuration Release -- selftest
 - 最小 ISO9660 描述符、Path Table、根目录、payload LBA 和模板替换结果。
 - 半径标定 PNG 预览和连续多 ECC Block 原始镜像输出。
 - 内圈 ISO9660/Joliet 文件、Unicode 子目录和外圈绘图数据的隔离保护。
+
+## 编码标准复核（2026-11-06）
+
+本轮对照 [ECMA-267 第三版 §§16–22、Annex G](https://ecma-international.org/wp-content/uploads/ECMA-267_3rd_edition_april_2001.pdf)，并用 [ECMA-359 §16（DVD-R）](https://ecma-international.org/wp-content/uploads/ECMA-359_1st_edition_december_2004.pdf#page=45) 核对可刻录盘的数据帧差异。除前述副 SY6 外，确认并修正了 EDC 重复补 32 位零的问题：按最高位与输入位异或反馈的实现已经计算了 `data(x) × x^32 mod G(x)`，末尾再移入 32 位零会得到错误余数。生成与校验原先共用同一函数，原有往返检查未能发现该错误。
+
+以 PSN `0x030000`、2048 字节全零 payload 为例，正确 EDC 是 `0x02AEBAF1`，旧实现得到 `0x3079E6BE`。新回归使用独立多项式长除法验证完整 2064 字节帧的余数为零，同时覆盖递增和全 FF payload。修正影响精确编码和后续 ECC、DSV、求解评分；快速导出、流式刻录及标定图案只输出 payload，实际校验与调制由刻录机生成。
+
+独立审计结果如下；这些是本轮核对范围，不代表已测量实际盘面信号：
+
+| 检查项 | 覆盖 | 结果 |
+| --- | --- | --- |
+| Annex G 主表/替代表 | 1024/352 个码字及各自下一状态，独立提取官方 PDF | 全部一致 |
+| 同步码与顺序 | 32 个码值、每扇区 26 个类别 | SY6 修正后全部一致 |
+| 有限域、IED/PI/PO | 全部 65,536 个 GF 乘积、288 个独立长除法向量 | 通过 |
+| 扰码 | 16 组初值、256 个 PSN 及其下一周期，共 1,048,576 字节 | 通过 |
+| ECC 与交织 | 4 块的 768 个数据行、688 个 PO 列、832 个 PI 行、151,424 字节布局 | 通过 |
+| EFMPlus 控制与解码 | 9,728 个同步帧、885,248 个字节独立解码，含 236 次副 SY6 | RLL、DSV、电平及评分边界一致 |
+
+§22 允许 DSV 相等时由实现选择数据流；当前固定选择 Stream 1 合规。`-64..63` 是尝试帧末备用 SYNC 的触发区间，不是 DSV 必须满足的硬上限。前缀搜索省略帧末备用 SYNC，最终候选仍由完整评分器重算。
+
+介质范围仍需区分：当前 `Sector Information = 0x00` 符合 ECMA-359 §16.1 的普通 DVD-R 数据区；[ECMA-337 第四版 §13.1.1（DVD+RW）](https://ecma-international.org/wp-content/uploads/ECMA-337_4th_edition_june_2008.pdf#page=34) 要求 DVD+RW 数据区的该字节为 `0x62`，其 §13.7 还规定 RUN 的连接位及起始 SYNC 选择。当前精确模型没有这些 DVD+RW 参数。用精确模型评估 #90 的 DVD+RW 实盘时，需要先扩展介质配置并重算 ID、IED、EDC、ECC，再验证设备的调制选择；不能只把固定值改成 `0x62`，否则会破坏 DVD-R 模型。上述两个算法修正本身不构成 #90 读盘兼容性已经解决的证据。
 
 ## 目标文件
 
@@ -347,7 +388,7 @@ dotnet run --project src/DvdImageSolver --configuration Release -- solve `
 
 混合模式默认使用`--algorithm dispersion --fast-output true`，适合直接生成整个外圈。也可显式加`--fast-output false`：此时程序会先编码并回放内圈的所有数据块，求出进入外圈时的 EFMPlus state、DSV 和 pit/land，再用精确边界绘图。精确回放会随内圈数据量增加耗时。
 
-GUI 设计页的“随盘文件”区域可选择文件夹，并切换“文件位置：内圈／外圈”；导出页与之共享设置。该选项随工程保存，也用于流式刻录。流式路径固定使用快速 dispersion：先扫描目录并固定布局，按盘面顺序输出元数据、文件区和图案区，不创建完整临时 ISO；外圈模式先写图案，再写文件。布局完成后若源文件大小发生变化，流式写入会拒绝继续。预览用黄色标出文件系统占用区，颜色不会进入写盘数据。
+GUI 设计页的“随盘文件”区域可选择文件夹，并切换“文件位置：内圈／外圈”；导出页与之共享设置。该选项随工程保存，也用于流式刻录。流式路径固定使用快速 dispersion：先扫描目录并固定布局，按盘面顺序输出元数据、文件区和图案区，不创建完整临时 ISO；外圈模式先写图案，再写文件。布局完成后若源文件大小发生变化，流式写入会拒绝继续。预览用主题蓝色标出文件系统占用区，颜色不会进入写盘数据。
 
 此模式不接受`--lba`或`--fill-sectors`，两者由文件布局和盘片容量自动计算。`--drawing-start-lba N` 可在默认绘图起点之后额外留空，但必须处于可绘图区内，并与`--psn-offset`一起对齐到16 sectors。`--file-position outer` 必须与 `--data-dir` 一起使用。
 

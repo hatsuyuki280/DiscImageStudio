@@ -2,6 +2,80 @@
 
 ## Unreleased
 
+### 中文
+
+- Windows 应用宿主设置 `CetCompat=false`，作为 #229 所报启动失败的兼容性处理；这会降低该应用进程的硬件影子栈保护，不修改系统级安全设置。受影响原机上的启动结果仍待验证。
+- 新增 Windows ARM64 自包含单文件 EXE；Windows x64 与 ARM64 分别在原生 runner 上构建并对最终发布文件执行自检、音轨生成和 GUI 截图检查，Release 复用这些已测试制品。ARM64 使用 Windows 11，CI 仅覆盖软件检查，尚未验证实盘刻录。
+- 设计页支持从资源管理器拖入单张或多张图片，沿用按钮导入的图层缩放和失败提示；忽略文件夹及非图片文件，任务执行期间禁用导入。
+- 预览生成失败时一律清空旧图和导出入口，状态栏与占位区只保留失败原因；切换界面语言会重新表述失败，不会恢复之前的画面。
+- 设计页占用区引导改用 CD、DVD、BD 的真实布局规划器，并按可用（可写）容量计算，包含文件系统元数据、逐文件扇区取整与对齐；与 #96 的碎片化放置共用与图片无关的元数据预留。外圈放置文件时同时标出内圈元数据，支持多个环形区域。文件夹或盘片参数变化后延迟合并计算，图片编辑不再触发重算。
+- 设计画布的占用区引导改为主题蓝色，并绘制在全部图层与选择框之上；同时提高不透明度，亮色画面不再遮住引导。
+- 影调与预览页的文件区叠加和对应图例同步改为主题蓝色；影调面板中的图例移到设计画布左下角，不再占用右侧轨道高度。
+- 设计页图层卡片移除上移／下移／删除按钮：排序继续使用拖拽，删除保留右键菜单与 Del 键；随盘文件的选择按钮文案统一为「浏览…」。
+- 移除「显示数据可能占用区域」开关，蓝色占用区引导改为默认始终显示。
+- 生成 CD／DVD 数据盘 ISO 时校验卷标长度：超过 Joliet 的 16 个字符会在写入前报错，不再静默截断；导出页的卷标输入限制为 16 个字符并显示提示，蓝光 UDF 卷标不受影响。
+
+### English
+
+- Set `CetCompat=false` on the Windows application host as a compatibility workaround for the startup failure reported in #229. This reduces hardware shadow-stack protection for this application process without changing system-wide security settings. Startup on the affected original machine still needs verification.
+- Add a self-contained single-file Windows ARM64 EXE. Windows x64 and ARM64 builds run on native runners and check the final executables with self-tests, audio-track generation and GUI snapshots; releases reuse those tested artifacts. ARM64 uses Windows 11. CI covers software checks only; physical disc burning on ARM64 remains unverified.
+- Import one or multiple images by dragging files from Explorer onto the design page, using the same layer fitting and failure messages as the import button. Folders and unrelated files are ignored, and imports are disabled while a job is running.
+- Any failed preview now clears the previous picture and its export entry; the status line and placeholder keep only the failure reason. Switching the UI language re-words the failure without restoring the old image.
+- The design guide now uses the real CD, DVD and BD layout planners with the usable (writable) sector count, including filesystem metadata, per-file sector rounding and alignment. It shares the image-independent metadata reserve with the fragmented placement in #96. Outer-ring files also mark their inner metadata, and multiple annuli are supported. Folder or disc parameter edits are debounced and coalesced; artwork edits no longer recompute the guide.
+- The design canvas guide is now theme blue and is drawn above every layer and selection adorner. Its opacity is raised so bright artwork can no longer hide it.
+- The tone and preview pages now use the same theme blue for their file-region overlay and legend. The tone panel's legend moved to the design canvas bottom-left corner, so it no longer consumes right-rail height.
+- Removed the move-up, move-down, and delete buttons from the design layer card. Reordering stays on drag, and deletion remains available from the row menu and the Del key. The disc-file picker buttons now read "Browse…".
+- Removed the "Show data occupancy area" toggle; the blue guide is always visible.
+- Validate volume-label length when generating CD/DVD data ISOs: labels longer than Joliet's 16 characters now fail before writing instead of being silently truncated. The export page limits label input to 16 characters with a hint; Blu-ray UDF labels are unaffected.
+
+## [1.5.0] - 2026-11-07
+
+### 中文
+
+- 工程切换盘片预设时同步高级预览的实测半径和三项轨距系数；在工程设置中保存预设后立即应用并选中新条目，后续取消窗口不撤销该次保存。标定记录可保存已确认的拟合结果，重开后恢复所选候选及设置，同时保留照片对应的原刻录参数。
+- 分离盘片几何总扇区数与可用扇区数，补齐内置预设；旧预设缺字段时 CD 预留 2 扇区、DVD 保守预留 608 扇区，显式可用值不重复扣减。设计、预览和导出使用可用区域，流式刻录在布局前按实际可写容量限制输出并保持 DVD 16／BD 32 扇区对齐；标定读盘同时保留几何与可写容量，混合镜像按输出长度安排文件及尾部元数据。移除 CD 隐式允许超出 DAO 边界 3 扇区的容差，写前严格遵守设备报告的 lead-out 上限。新建 CD 粗标会检查最外侧固定测量边界是否完整可写；BD 预览缓存有效外半径，避免缩小容量时逐像素重复解算几何。
+- 将详细刻录诊断扩展到 DVD 和 BD：共同记录构建环境、光驱固件、物理盘片类型及空白状态；DVD 记录容量、缓冲保护／封盘设置和阶段耗时，BD 记录 profile、格式化状态、轨道与可写地址及刷新／封盘／释放耗时。失败前缓存源流与设备上下文，保留 BD 底层真实 SCSI sense；DVD 高层接口未提供的 sense 明确记为不可用。
+- 补充 CD 音轨／数据盘 DAO 刻录诊断：记录构建版本、系统、光驱固件、实际盘片类型与写前空白状态、子通道及速度设置、容量余量、阶段耗时、生成与主机缓冲状态；导入区事件快照每两秒最多记录一次。失败上下文在清理前保存，不额外查询故障设备；明确标注 IMAPI 未提供失败命令的 SCSI sense。
+- 统一 CD、DVD、BD 的影调预览为 512×512：记录区外与中心孔使用透明遮罩，取消固定裁切，并按实际文件布局标黄文件及文件系统区域。CD 显示适配记录外半径，保留生成时的图片采样比例；修改文件夹、卷标和内外圈位置会自动刷新。
+- 修复 CD 数据盘 DAO 子码沿用音轨 ADR3/ISRC 包的问题：按扇区位置重建完整 ADR1 时间包并重算 CRC，覆盖预间隙、数据区与导出区；保留原有 TOC、ADR1/ADR2 和 P/R-W 处理。补充边界、两种子通道格式及音轨输出逐字节不变的回归。
+- 新增默认关闭的「DVD 读取兼容性（实验性）」选项；根据 #90 的全盘读回反馈，当前配方改为 `periodic-9b-16-v1`：每扇区固定每 16 字节将归属于绘图的非 `A5/9B` 扰码字节改为 `9B`，纯白扇区改变 128 字节，不叠加旧段首规则。文件、透明区域及绘图范围外保持不变；旧 sidecar 继续可读，已有标靶保留原配方，新标靶使用新规则。盘面纹理和对比度可能变化，仍需更多光驱与盘片反馈；CD／BD 不变。
+- 按 ECMA-267 修正 DVD EFMPlus 模型在状态 3/4 下的副 SY6 同步码，纠正精确编码及 DSV/边界回放；补充完整同步码标准向量和实际编码回归。
+- 修正 DVD 数据帧 EDC 计算中重复补 32 位零的问题，使校验字节及后续 ECC/调制回放符合标准；补充独立多项式长除法和完整数据帧向量检查。
+
+### English
+
+- Synchronize advanced preview radii and cubic pitch coefficients when applying a project preset. Saving a preset in project settings immediately applies and selects it, even if the dialog is later cancelled. Calibration records retain confirmed fitting results and restore the selected candidate and setup while preserving the photographed disc's original generation parameters.
+- Separate geometry sector counts from usable capacity and populate built-in presets. Legacy presets without a usable value reserve 2 CD sectors or a conservative 608 DVD sectors; explicit limits are never reduced twice. Artwork, previews and exports follow the usable region. Streaming burns constrain layouts to the current writable capacity, aligned to 16 DVD sectors or 32 BD sectors. Calibration reads retain both counts, and filesystem layouts keep files and trailing metadata within the output length. Remove the implicit 3-sector CD DAO overburn allowance so the final check strictly enforces the reported lead-out limit. Reject new CD coarse targets whose outer fixed measurement edge cannot fit, and cache the usable radius during BD previews to avoid solving geometry for every pixel.
+- Extended detailed burn diagnostics to DVD and BD, sharing build/runtime, recorder firmware, physical media type and blank-state reporting. DVD adds capacity, buffer/closure settings and phase timings; BD adds profile, format state, track/writable-address data and flush/close/release timings. Source and device context are cached before cleanup, preserving real BD command-level SCSI sense and explicitly marking sense unavailable through the high-level DVD API.
+- Added CD audio/data DAO diagnostics for the build, OS, recorder firmware, reported physical media type and pre-write blank state, subchannel and speed settings, capacity margin, phase timings and producer/host-buffer state. Lead-in event snapshots are throttled to at most one every two seconds. Failure context is retained before cleanup without querying the failing device; unavailable command-level SCSI sense is explicitly identified.
+- Unified CD, DVD and BD tone previews at 512×512, with transparent masks outside the recording area and inside the centre hole. Removed the fixed crop and highlighted file and filesystem regions from the actual layout plans. CD previews fit the recording radius while preserving the generator's source-image scale; folder, volume-label and inner/outer placement changes refresh automatically.
+- Fixed CD data-disc DAO subcode retaining audio ADR3/ISRC packets. Rebuild complete ADR1 timing packets and CRCs from the sector position in the pregap, program area and lead-out, while retaining existing TOC, ADR1/ADR2 and P/R-W handling. Added boundary, subchannel-format and byte-for-byte audio-output regression coverage.
+- Added the opt-in “DVD read compatibility (experimental)” option. Following the full-disc readback feedback in #90, the current `periodic-9b-16-v1` recipe replaces owned scrambled drawing bytes other than `A5/9B` with `9B` at fixed 16-byte intervals: 128 changes per entirely white sector, without the old run-start rule. Files, alpha-excluded bytes and bytes outside the drawing range are preserved. Legacy sidecars remain readable; existing calibration targets retain their original recipe and new targets use the new rule. Texture and contrast may change, and more drive/media feedback is needed. CD/BD are unchanged.
+- Corrected the DVD EFMPlus model's secondary SY6 code for states 3/4 to match ECMA-267, fixing exact encoding and DSV/boundary replay. Added standard vectors for all sync codes and an encoded-output regression.
+- Fixed an extra 32 zero bits in the DVD data-frame EDC calculation, correcting the checksum and subsequent ECC/modulation replay. Added independent polynomial-division checks and complete data-frame vectors.
+
+## [1.4.2] - 2026-11-06
+
+### 中文
+
+- 界面词条缺译时先回退英文，再回退简体中文；标定、工程和预设弹窗沿用同一规则，可继续按词条补充其他界面语言。
+- 补齐照片矫正误差、标定记录版本、工程和预设校验弹窗的英文提示；动态数值与参数名不再妨碍翻译匹配，诊断日志保留原始异常。
+- 补齐标定拟合原因与状态提示的英文翻译，修复英文界面的侧栏和底部日志混入中文；精简刻录状态快照、校验和取消日志中的重复说明，保留诊断字段与实际状态。
+- 修复 CD 流式刻录（音轨与数据盘 DAO）在部分刻录机上首次写入导入区即失败、Windows 刻录接口返回 `0xC0AA0301` 的问题。刻录机报告支持时改用 Raw P-W 子通道（`IMAPI_FORMAT2_RAW_CD_SUBCODE_IS_RAW`，仍为 2448 字节扇区），否则保留 Cooked R-W。IMAPI 在两种格式下生成的镜像逐字节相同，盘面内容不变，只改变告知刻录机的子通道格式；刻录日志会记录实际采用的格式。该问题在 HP BD-RE BU20N（HL-DT-ST，固件 0403）上发现：v1.3.6 以 4× 刻录时返回 `0xC0AA0301`。独立 SCSI 工具的模拟刻录（Test Write）中，Cooked R-W（数据块类型 2）在 4× 与 16× 下第一个写入命令即被拒绝（5/64/00），Raw P-W（数据块类型 3）以 4× 接受了前 3,000 个导入区扇区，SAO 以 4× 正常写入。这些模拟未经过 IMAPI；修复版随后已在同一刻录机上通过 IMAPI 完成 CD-R 流式实盘刻录（用户实测）。
+- CD、DVD、蓝光的界面导出改为调用类型化内部生成接口；DVD 设计投影和读回预览直接调用渲染器，支持取消并保留原始异常。命令行参数、控制台输出和退出码留在 CLI 边界，现有命令保持兼容。
+- 导出、标定、设计合成与影调预览日志保留异常堆栈、内部异常及诊断上下文；失败导出不再更新读回输入，标定清理失败不再覆盖原始结果，容量读取失败不再显示为任务成功。
+- 设计页图层列表支持拖拽排序（整行快照随指针浮动、相邻行缓动让位、Esc 取消回弹）与右键删除；打开工程时图层图片与缩略图改为后台并行解码，界面不再因逐张解码而冻结；最近工程卡片在等待打开时沿圆角循环显示与保存确认同源的光迹。
+
+### English
+
+- Missing UI translations now fall back to English before Simplified Chinese. Calibration, project, and preset popups use the same rules and support translations in the other UI languages.
+- Added English popup messages for photo rectification errors, calibration record versions, and project and preset validation. Dynamic values and parameter names no longer prevent translation lookup; diagnostic logs retain the original exceptions.
+- Added English translations for calibration fit reasons and status messages, fixing Chinese text in the English sidebar and bottom log. Shortened repetitive explanations in burn snapshots, verification status, and cancellation logs while retaining diagnostic fields and actual states.
+- Fixed CD streaming burns (audio and data-disc DAO) failing with `0xC0AA0301` at the first lead-in write on some recorders. When the recorder reports support, the burner now uses raw P-W subchannel data (`IMAPI_FORMAT2_RAW_CD_SUBCODE_IS_RAW`, still 2448-byte sectors) and otherwise keeps cooked R-W. IMAPI produces byte-identical images in both layouts, so the disc content is unchanged and only the subchannel layout announced to the recorder differs; the burn log records the format in use. Found on an HP BD-RE BU20N (HL-DT-ST, firmware 0403): v1.3.6 failed at 4× with `0xC0AA0301`. In Test Write runs with a standalone SCSI tool, cooked R-W (data block type 2) was rejected at the first write command at 4× and 16× (5/64/00), raw P-W (data block type 3) accepted the first 3,000 lead-in sectors at 4×, and SAO wrote normally at 4×. Those runs did not go through IMAPI; the fixed build has since completed a real CD-R streaming burn through IMAPI on the same recorder (user test).
+- GUI CD, DVD, and Blu-ray exports now call typed internal generation APIs. DVD projection and readback previews call renderers directly, support cancellation, and preserve original exceptions. Argument parsing, console output, and exit codes remain at the CLI boundary; existing commands remain compatible.
+- Export, calibration, design composition, and tone preview logs retain exception stacks, inner causes, and diagnostic context. Failed exports no longer replace readback inputs; calibration cleanup errors preserve the original outcome, and capacity-read errors no longer complete successfully.
+- Design layers can be reordered by dragging (a row snapshot follows the pointer, neighbouring rows ease one slot aside, Escape cancels) and deleted from a single-item right-click menu. Layer image and thumbnail decodes now run off the UI thread before a project is applied, so opening a multi-layer project no longer freezes the window. Recent-project cards show a looping save-trail stroke while their project opens.
+
 ## [1.4.1] - 2026-11-05
 
 ### 中文

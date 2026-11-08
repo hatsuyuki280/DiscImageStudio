@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using DiscImageStudio.Core;
 using DvdImageSolver.Encoding;
 
 namespace DvdImageSolver.Solver;
@@ -24,7 +25,9 @@ public sealed record MultiBlockSolveOptions(
     int SearchLanes = 1,
     int FastParallelism = 0,
     bool PreserveExistingIso = false,
-    bool UseSampleReuse = true)
+    bool UseSampleReuse = true,
+    bool ReadCompatibility = false,
+    string ReadCompatibilityMode = DvdReadCompatibilityModes.Current)
 {
     /// <summary>Use four-double raster sampling in fast output when supported; false retains the scalar reference path.</summary>
     public bool UseSimdSampling { get; init; } = true;
@@ -104,7 +107,7 @@ internal static class MultiBlockImageSolver
         long totalControlledGrayScoreMaximum = 0;
         Stopwatch stopwatch = Stopwatch.StartNew();
         uint isoSectors = options.PreserveExistingIso
-            ? options.ImageMapping.TotalSectors
+            ? options.ImageMapping.OutputSectors
             : checked(options.StartLba + options.FillSectors);
         using RawIsoImageWriter iso = new(
             isoOutputPath,
@@ -220,6 +223,9 @@ internal static class MultiBlockImageSolver
 
     private static void Validate(MultiBlockSolveOptions options)
     {
+        if (options.ReadCompatibility)
+            throw new ArgumentException("Read compatibility requires fast dispersion output.", nameof(options));
+
         if (options.FillSectors < DvdEccBlockEncoder.SectorCount
             || options.FillSectors % DvdEccBlockEncoder.SectorCount != 0)
         {
@@ -228,7 +234,13 @@ internal static class MultiBlockImageSolver
                 "Range fill sector count must be a positive multiple of 16.");
         }
 
-        if ((ulong)options.StartLba + options.FillSectors > options.ImageMapping.TotalSectors)
+        if (options.ImageMapping.OutputSectors == 0
+            || options.ImageMapping.OutputSectors > options.ImageMapping.TotalSectors
+            || !double.IsFinite(options.ImageMapping.SamplingOuterRadiusMm)
+            || options.ImageMapping.SamplingOuterRadiusMm <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options), "Output capacity and image radius must lie inside the disc geometry.");
+
+        if ((ulong)options.StartLba + options.FillSectors > options.ImageMapping.OutputSectors)
         {
             throw new ArgumentOutOfRangeException(nameof(options), "Filled range exceeds the reported disc size.");
         }

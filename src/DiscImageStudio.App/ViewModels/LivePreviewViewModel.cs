@@ -9,6 +9,7 @@ using DiscImageStudio.Core;
 using DiscImageStudio.Dvd;
 using DiscImageStudio.Imaging;
 using DiscImageStudio.Services;
+using DvdImageSolver.Solver;
 
 namespace DiscImageStudio.ViewModels;
 
@@ -261,6 +262,7 @@ public partial class LivePreviewViewModel : ObservableObject
             CdDiscParameters parameters = dataMetadata.Parameters;
             ToneProfile dataTone = dataMetadata.Tone.Normalized();
             _state.CdSectors = parameters.Sectors.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            _state.CdUsableSectors = parameters.OutputSectors.ToString(System.Globalization.CultureInfo.InvariantCulture);
             _state.CdInnerRadius = FormatNumber(parameters.InnerRadiusMm);
             _state.CdOuterRadius = FormatNumber(parameters.OuterRadiusMm);
             _state.CdPitchLinear = FormatNumber(parameters.PitchLinear);
@@ -289,7 +291,8 @@ public partial class LivePreviewViewModel : ObservableObject
             metadata.ToneLevels,
             metadata.ToneBrightness,
             metadata.ToneSrgbLinearization).Normalized();
-        if (state.CdSectors.Trim() == sectors
+        if (state.CdUsableSectors.Trim() == (metadata.UsableSectors ?? metadata.Sectors).ToString(System.Globalization.CultureInfo.InvariantCulture)
+            && state.CdSectors.Trim() == sectors
             && state.CdInnerRadius.Trim() == innerRadius
             && state.CdOuterRadius.Trim() == outerRadius
             && state.CdPitchLinear.Trim() == FormatNumber(metadata.PitchLinear)
@@ -305,6 +308,7 @@ public partial class LivePreviewViewModel : ObservableObject
         }
 
         state.CdSectors = sectors;
+        state.CdUsableSectors = (metadata.UsableSectors ?? metadata.Sectors).ToString(System.Globalization.CultureInfo.InvariantCulture);
         state.CdInnerRadius = innerRadius;
         state.CdOuterRadius = outerRadius;
         state.CdPitchLinear = FormatNumber(metadata.PitchLinear);
@@ -341,7 +345,8 @@ public partial class LivePreviewViewModel : ObservableObject
             System.Globalization.CultureInfo.InvariantCulture);
         string innerRadius = FormatNumber(metadata.InnerRadiusMm);
         string outerRadius = FormatNumber(metadata.OuterRadiusMm);
-        if (state.DvdTotalSectors.Trim() == totalSectors
+        if (state.DvdUsableSectors.Trim() == (metadata.UsableSectors ?? metadata.TotalSectors).ToString(System.Globalization.CultureInfo.InvariantCulture)
+            && state.DvdTotalSectors.Trim() == totalSectors
             && state.DvdInnerRadius.Trim() == innerRadius
             && state.DvdOuterRadius.Trim() == outerRadius
             && state.DvdPitchLinear.Trim() == FormatNumber(metadata.PitchLinear)
@@ -353,6 +358,7 @@ public partial class LivePreviewViewModel : ObservableObject
         }
 
         state.DvdTotalSectors = totalSectors;
+        state.DvdUsableSectors = (metadata.UsableSectors ?? metadata.TotalSectors).ToString(System.Globalization.CultureInfo.InvariantCulture);
         state.DvdInnerRadius = innerRadius;
         state.DvdOuterRadius = outerRadius;
         state.DvdPitchLinear = FormatNumber(metadata.PitchLinear);
@@ -391,6 +397,7 @@ public partial class LivePreviewViewModel : ObservableObject
         string innerRadius = FormatNumber(metadata.InnerRadiusMm);
         string outerRadius = FormatNumber(metadata.OuterRadiusMm);
         state.BdTotalSectors = sectors;
+        state.BdUsableSectors = (metadata.UsableSectors ?? metadata.TotalSectors).ToString(System.Globalization.CultureInfo.InvariantCulture);
         state.BdInnerRadius = innerRadius;
         state.BdOuterRadius = outerRadius;
         state.BdPitchLinear = FormatNumber(metadata.PitchLinear);
@@ -507,17 +514,14 @@ public partial class LivePreviewViewModel : ObservableObject
                 {
                     _livePreviewFailure = failure;
                     StatusText = L.F($"实时预览失败：{failure}");
+                    ResultPreviewPlaceholderText = StatusText;
                 }
             }
 
             return;
         }
 
-        if (_livePreviewFailure is { } failed)
-        {
-            StatusText = L.F($"实时预览失败：{failed}");
-        }
-        else if (_readyStatus is not null)
+        if (_readyStatus is not null)
         {
             StatusText = _readyStatus();
         }
@@ -556,10 +560,21 @@ public partial class LivePreviewViewModel : ObservableObject
             return;
         }
 
+        ClearResult();
+    }
+
+    /// <summary>Drops the rendered picture, its legend, its export source and its temporary
+    /// file. Every failed refresh routes through here first: a stale picture under an error
+    /// line claims the disc still carries what the previous run produced.</summary>
+    private void ClearResult()
+    {
+        HasFileRegionOverlay = false;
         ResultImage = null;
         HasResultImage = false;
         ResultPreviewPath = string.Empty;
         _downloadablePreview = false;
+        _readyStatus = null;
+        _livePreviewFailure = null;
         DownloadPreviewCommand.NotifyCanExecuteChanged();
         string? previousPath = _lastLivePreviewPath;
         _lastLivePreviewPath = null;
@@ -574,8 +589,20 @@ public partial class LivePreviewViewModel : ObservableObject
 
     private void SetLivePreviewFailure(Exception exception)
     {
+        ClearResult();
         _livePreviewFailure = exception.Message;
         StatusText = L.F($"实时预览失败：{exception.Message}");
+        ResultPreviewPlaceholderText = StatusText;
+    }
+
+    /// <summary>An input problem detected before rendering starts (missing artifact, invalid
+    /// geometry). It clears the picture exactly like a thrown failure, but the message is not
+    /// kept for a language switch: it names the missing input rather than a broken pipeline.</summary>
+    private void SetLivePreviewUnavailable(string message)
+    {
+        ClearResult();
+        StatusText = message;
+        ResultPreviewPlaceholderText = message;
     }
 
     internal void Schedule()
@@ -679,22 +706,18 @@ public partial class LivePreviewViewModel : ObservableObject
                 out int samplesPerSector,
                 out string message))
         {
-            StatusText = message;
-            if (!HasResultImage)
-            {
-                ResultPreviewPlaceholderText = message;
-            }
-
+            SetLivePreviewUnavailable(message);
             return;
         }
 
         bool deinterleave = _state.CdInterleave;
         bool dataImage = Path.GetExtension(trackPath).Equals(".iso", StringComparison.OrdinalIgnoreCase);
-        string outputPath = TempFiles.GetCacheFilePath($"cd-live-preview-{revision}.png");
+        string? outputPath = null;
         StatusText = L.F($"正在刷新 {outputSize} px 实时预览…");
         bool keepOutput = false;
         try
         {
+            outputPath = TempFiles.GetCacheFilePath($"cd-live-preview-{revision}.png");
             CdDataImageMetadata? metadata = dataImage ? CdDataImageMetadata.TryLoad(trackPath) : null;
             if (metadata is not null)
             {
@@ -766,22 +789,20 @@ public partial class LivePreviewViewModel : ObservableObject
                 out ToneProfile tone,
                 out string message))
         {
-            StatusText = message;
-            if (!HasResultImage)
-            {
-                ResultPreviewPlaceholderText = message;
-            }
-
+            SetLivePreviewUnavailable(message);
             return;
         }
 
-        string outputPath = TempFiles.GetCacheFilePath($"cd-live-warp-{revision}.png");
+        string? outputPath = null;
         StatusText = L.F($"正在刷新 {outputSize} px 标定预览…");
         bool keepOutput = false;
         try
         {
+            outputPath = TempFiles.GetCacheFilePath($"cd-live-warp-{revision}.png");
             string dataDirectory = _state.CdDataDirectory.Trim();
-            string volumeLabel = _state.CdVolumeLabel.Trim();
+            string volumeLabel = dataDirectory.Length > 0
+                ? _state.ResolveVolumeLabel(OpticalDiscFamily.CompactDisc)
+                : string.Empty;
             bool filesAtOuterRing = _state.CdFilesAtOuterRing;
             CdDataLayoutPlan? plan = await StaWorker.RunAsync(() =>
             {
@@ -854,44 +875,36 @@ public partial class LivePreviewViewModel : ObservableObject
     /// bytes and splats them under the measured disc geometry.</summary>
     private async Task RefreshDvdReadbackAsync(int revision, CancellationToken cancellationToken)
     {
-        string outputPath = TempFiles.GetCacheFilePath($"dvd-live-preview-{revision}.png");
-        string summaryJsonPath = outputPath + ".json";
-        if (!TryBuildDvdCommand(
-                outputPath,
+        string? outputPath = null;
+        if (!TryBuildDvdReadbackOptions(
                 out string isoPath,
-                out string[] arguments,
-                out int outputSize,
-                out int samplesPerSector,
+                out IsoReadbackOptions options,
                 out string message))
         {
-            StatusText = message;
-            if (!HasResultImage)
-            {
-                ResultPreviewPlaceholderText = message;
-            }
-
+            SetLivePreviewUnavailable(message);
             return;
         }
 
+        int outputSize = options.PreviewSize;
+        int samplesPerSector = options.SamplesPerSector;
         StatusText = L.F($"正在刷新 {outputSize} px DVD 实时预览…");
         bool keepOutput = false;
         try
         {
+            outputPath = TempFiles.GetCacheFilePath($"dvd-live-preview-{revision}.png");
             DvdImageMetadata? metadata = DvdImageMetadata.TryLoad(isoPath);
             DvdStreamingOptions actual = ReadDvdPreviewGeometry(calibration: false);
             bool overlay = metadata is { HasFileSystem: true };
-            int exitCode = await StaWorker.RunAsync(() =>
+            await StaWorker.RunAsync(() =>
             {
-                int result = UnifiedCommandRunner.Run(arguments);
-                if (result == 0 && overlay)
+                var range = IsoReadbackRenderer.ReadDrawingRange(isoPath, options.TotalSectors);
+                IsoReadbackRenderer.Render(isoPath, outputPath,
+                    options with { StartLba = range.StartLba, FillSectors = range.FillSectors }, cancellationToken);
+                if (overlay)
                     FileRegionPreviewOverlay.ApplyDvd(outputPath, actual,
                         metadata!.DrawingStartLba, metadata.DrawingEndLbaExclusive, cancellationToken);
-                return result;
+                return 0;
             });
-            if (exitCode != 0)
-            {
-                throw new InvalidOperationException(L.T("DVD 读回模拟引擎未能完成渲染。"));
-            }
 
             cancellationToken.ThrowIfCancellationRequested();
             if (revision != _livePreviewRevision)
@@ -909,11 +922,10 @@ public partial class LivePreviewViewModel : ObservableObject
         catch (Exception exception)
         {
             SetLivePreviewFailure(exception);
-            _shell.AppendLog(L.F($"[{DateTime.Now:HH:mm:ss}] DVD 实时预览失败：{exception}\n"));
+            _shell.AppendLog(JobDiagnostics.FormatLog($"DVD preview · {options}", exception));
         }
         finally
         {
-            TryDeleteFile(summaryJsonPath);
             if (!keepOutput)
             {
                 TempFiles.TryDeleteTemporaryFile(outputPath);
@@ -925,43 +937,33 @@ public partial class LivePreviewViewModel : ObservableObject
     /// generated radii and projects it onto the measured ones.</summary>
     private async Task RefreshDvdCalibrationAsync(int revision, CancellationToken cancellationToken)
     {
-        string outputPath = TempFiles.GetCacheFilePath($"dvd-live-warp-{revision}.png");
-        string summaryJsonPath = outputPath + ".json";
-        if (!TryBuildDvdCalibrateCommand(
-                outputPath,
+        string? outputPath = null;
+        if (!TryBuildDvdCalibrationOptions(
                 out string imagePath,
-                out string[] arguments,
-                out int outputSize,
-                out int samplesPerSector,
+                out CalibrationPreviewOptions options,
                 out DvdHybridStreamingPlan? filePlan,
                 out string message))
         {
-            StatusText = message;
-            if (!HasResultImage)
-            {
-                ResultPreviewPlaceholderText = message;
-            }
-
+            SetLivePreviewUnavailable(message);
             return;
         }
 
+        int outputSize = options.PreviewSize;
+        int samplesPerSector = options.SamplesPerSector;
         StatusText = L.F($"正在刷新 {outputSize} px DVD 标定预览…");
         bool keepOutput = false;
         try
         {
+            outputPath = TempFiles.GetCacheFilePath($"dvd-live-warp-{revision}.png");
             DvdStreamingOptions actual = ReadDvdPreviewGeometry(calibration: true);
-            int exitCode = await StaWorker.RunAsync(() =>
+            await StaWorker.RunAsync(() =>
             {
-                int result = UnifiedCommandRunner.Run(arguments);
-                if (result == 0 && filePlan is not null)
+                CalibrationPreviewRenderer.Render(imagePath, outputPath, options, cancellationToken);
+                if (filePlan is not null)
                     FileRegionPreviewOverlay.ApplyDvd(outputPath, actual,
                         filePlan.DrawingStartLba, filePlan.DrawingEndLbaExclusive, cancellationToken);
-                return result;
+                return 0;
             });
-            if (exitCode != 0)
-            {
-                throw new InvalidOperationException(L.T("DVD 标定预览引擎未能完成渲染。"));
-            }
 
             cancellationToken.ThrowIfCancellationRequested();
             if (revision != _livePreviewRevision)
@@ -980,11 +982,10 @@ public partial class LivePreviewViewModel : ObservableObject
         catch (Exception exception)
         {
             SetLivePreviewFailure(exception);
-            _shell.AppendLog(L.F($"[{DateTime.Now:HH:mm:ss}] DVD 实时预览失败：{exception}\n"));
+            _shell.AppendLog(JobDiagnostics.FormatLog($"DVD preview · {options}", exception));
         }
         finally
         {
-            TryDeleteFile(summaryJsonPath);
             if (!keepOutput)
             {
                 TempFiles.TryDeleteTemporaryFile(outputPath);
@@ -1020,12 +1021,7 @@ public partial class LivePreviewViewModel : ObservableObject
             string message = imagePath.Length == 0
                 ? L.T("请先在设计页导入图片，合成图会自动填入。")
                 : L.T("蓝光源图片不存在。");
-            StatusText = message;
-            if (!HasResultImage)
-            {
-                ResultPreviewPlaceholderText = message;
-            }
-
+            SetLivePreviewUnavailable(message);
             return;
         }
 
@@ -1054,20 +1050,16 @@ public partial class LivePreviewViewModel : ObservableObject
                                               or IOException
                                               or UnauthorizedAccessException)
         {
-            StatusText = exception.Message;
-            if (!HasResultImage)
-            {
-                ResultPreviewPlaceholderText = exception.Message;
-            }
-
+            SetLivePreviewUnavailable(exception.Message);
             return;
         }
 
-        string outputPath = TempFiles.GetCacheFilePath($"bd-live-projection-{revision}.png");
+        string? outputPath = null;
         StatusText = L.F($"正在刷新 {outputSize} px 蓝光设计投影…");
         bool keepOutput = false;
         try
         {
+            outputPath = TempFiles.GetCacheFilePath($"bd-live-projection-{revision}.png");
             await StaWorker.RunAsync(() =>
             {
                 BluRayPreviewRenderer.RenderCalibration(
@@ -1126,12 +1118,7 @@ public partial class LivePreviewViewModel : ObservableObject
             string message = isoPath.Length == 0
                 ? L.T("请先选择生成的蓝光 ISO（导出页生成后自动填入）。")
                 : L.T("蓝光 ISO 文件不存在。");
-            StatusText = message;
-            if (!HasResultImage)
-            {
-                ResultPreviewPlaceholderText = message;
-            }
-
+            SetLivePreviewUnavailable(message);
             return;
         }
 
@@ -1149,20 +1136,16 @@ public partial class LivePreviewViewModel : ObservableObject
                                               or OverflowException
                                               or ArgumentException)
         {
-            StatusText = exception.Message;
-            if (!HasResultImage)
-            {
-                ResultPreviewPlaceholderText = exception.Message;
-            }
-
+            SetLivePreviewUnavailable(exception.Message);
             return;
         }
 
-        string outputPath = TempFiles.GetCacheFilePath($"bd-live-readback-{revision}.png");
+        string? outputPath = null;
         StatusText = L.F($"正在刷新 {outputSize} px 蓝光成品读回…");
         bool keepOutput = false;
         try
         {
+            outputPath = TempFiles.GetCacheFilePath($"bd-live-readback-{revision}.png");
             BluRayIsoMetadata? metadata = BluRayIsoMetadata.TryLoad(isoPath);
             bool overlay = metadata?.UdfTimestamp is not null;
             await StaWorker.RunAsync(() =>
@@ -1209,7 +1192,7 @@ public partial class LivePreviewViewModel : ObservableObject
         string dataDirectory = _state.BdDataDirectory.Trim();
         return BluRayIsoGenerator.PrepareDrawing(generated,
             dataDirectory.Length == 0 ? null : dataDirectory,
-            string.IsNullOrWhiteSpace(_state.BdVolumeLabel) ? "BD_IMAGE" : _state.BdVolumeLabel.Trim(),
+            _state.ResolveVolumeLabel(OpticalDiscFamily.BluRay),
             filesAtOuterRing: dataDirectory.Length > 0 && _state.BdFilesAtOuterRing);
     }
 
@@ -1221,12 +1204,13 @@ public partial class LivePreviewViewModel : ObservableObject
             ParameterParser.ParsePositiveDouble(calibration ? _state.DvdActualOuterRadius : _state.DvdOuterRadius, L.T("外半径")),
             PitchLinear: ParameterParser.ParseDouble(calibration ? _state.DvdActualPitchLinear : _state.DvdPitchLinear, L.T("相对一次项")),
             PitchQuadratic: ParameterParser.ParseDouble(calibration ? _state.DvdActualPitchQuadratic : _state.DvdPitchQuadratic, L.T("相对二次项")),
-            PitchCubic: ParameterParser.ParseDouble(calibration ? _state.DvdActualPitchCubic : _state.DvdPitchCubic, L.T("相对三次项")));
+            PitchCubic: ParameterParser.ParseDouble(calibration ? _state.DvdActualPitchCubic : _state.DvdPitchCubic, L.T("相对三次项")),
+            UsableSectors: checked((uint)_state.GetUsableSectors(OpticalDiscFamily.Dvd)));
         options.Validate();
         return options;
     }
 
-    private static BluRayDiscParameters ReadBluRayDisc(
+    private BluRayDiscParameters ReadBluRayDisc(
         string sectorsText, string innerText, string outerText,
         string pitchLinear, string pitchQuadratic, string pitchCubic)
     {
@@ -1243,7 +1227,8 @@ public partial class LivePreviewViewModel : ObservableObject
             ParameterParser.ParsePositiveDouble(outerText, L.T("蓝光外半径")),
             PitchLinear: ParameterParser.ParseDouble(pitchLinear, L.T("相对一次项")),
             PitchQuadratic: ParameterParser.ParseDouble(pitchQuadratic, L.T("相对二次项")),
-            PitchCubic: ParameterParser.ParseDouble(pitchCubic, L.T("相对三次项")));
+            PitchCubic: ParameterParser.ParseDouble(pitchCubic, L.T("相对三次项")),
+            UsableSectors: checked((uint)_state.GetUsableSectors(OpticalDiscFamily.BluRay)));
         disc.Validate();
         return disc;
     }
@@ -1297,7 +1282,22 @@ public partial class LivePreviewViewModel : ObservableObject
                 sectors,
                 PitchLinear: ParameterParser.ParseDouble(_state.CdPitchLinear, L.T("相对一次项")),
                 PitchQuadratic: ParameterParser.ParseDouble(_state.CdPitchQuadratic, L.T("相对二次项")),
-                PitchCubic: ParameterParser.ParseDouble(_state.CdPitchCubic, L.T("相对三次项")));
+                PitchCubic: ParameterParser.ParseDouble(_state.CdPitchCubic, L.T("相对三次项")),
+                UsableSectors: _state.GetUsableSectors(OpticalDiscFamily.CompactDisc));
+            if (!Path.GetExtension(trackPath).Equals(".iso", StringComparison.OrdinalIgnoreCase)
+                && CdTrackMetadata.TryLoad(trackPath) is { } metadata)
+            {
+                // A legacy sidecar's absent limit also records its original preview
+                // canvas convention. Keep that distinction after State adopts its count.
+                parameters = parameters with
+                {
+                    LinearVelocityMmPerSecond = metadata.LinearVelocityMmPerSecond,
+                    StartAngleRadians = metadata.StartAngleDegrees * Math.PI / 180.0,
+                    ImageOuterRadiusMm = metadata.ImageOuterRadiusMm,
+                    UsableSectors = metadata.UsableSectors,
+                    SourceImageOuterRadiusMm = metadata.SourceImageOuterRadiusMm,
+                };
+            }
             parameters.Validate();
 
             int configuredSize = ParameterParser.ParsePositiveInt(_state.CdPreviewSize, L.T("预览尺寸"));
@@ -1308,7 +1308,7 @@ public partial class LivePreviewViewModel : ObservableObject
             message = string.Empty;
             return true;
         }
-        catch (Exception exception) when (exception is FormatException or OverflowException or ArgumentOutOfRangeException)
+        catch (Exception exception) when (exception is FormatException or OverflowException or ArgumentException)
         {
             message = exception.Message;
             return false;
@@ -1356,14 +1356,16 @@ public partial class LivePreviewViewModel : ObservableObject
                 sectors,
                 PitchLinear: ParameterParser.ParseDouble(_state.CdPitchLinear, L.T("相对一次项")),
                 PitchQuadratic: ParameterParser.ParseDouble(_state.CdPitchQuadratic, L.T("相对二次项")),
-                PitchCubic: ParameterParser.ParseDouble(_state.CdPitchCubic, L.T("相对三次项")));
+                PitchCubic: ParameterParser.ParseDouble(_state.CdPitchCubic, L.T("相对三次项")),
+                UsableSectors: _state.GetUsableSectors(OpticalDiscFamily.CompactDisc));
             actual = new CdDiscParameters(
                 ParameterParser.ParsePositiveDouble(_state.CdActualInnerRadius, L.T("实测内半径")),
                 ParameterParser.ParsePositiveDouble(_state.CdActualOuterRadius, L.T("实测外半径")),
                 sectors,
                 PitchLinear: ParameterParser.ParseDouble(_state.CdActualPitchLinear, L.T("相对一次项")),
                 PitchQuadratic: ParameterParser.ParseDouble(_state.CdActualPitchQuadratic, L.T("相对二次项")),
-                PitchCubic: ParameterParser.ParseDouble(_state.CdActualPitchCubic, L.T("相对三次项")));
+                PitchCubic: ParameterParser.ParseDouble(_state.CdActualPitchCubic, L.T("相对三次项")),
+                UsableSectors: _state.GetUsableSectors(OpticalDiscFamily.CompactDisc));
             generated.Validate();
             actual.Validate();
 
@@ -1375,25 +1377,20 @@ public partial class LivePreviewViewModel : ObservableObject
             message = string.Empty;
             return true;
         }
-        catch (Exception exception) when (exception is FormatException or OverflowException or ArgumentOutOfRangeException)
+        catch (Exception exception) when (exception is FormatException or OverflowException or ArgumentException)
         {
             message = exception.Message;
             return false;
         }
     }
 
-    private bool TryBuildDvdCommand(
-        string outputPath,
+    private bool TryBuildDvdReadbackOptions(
         out string isoPath,
-        out string[] arguments,
-        out int outputSize,
-        out int samplesPerSector,
+        out IsoReadbackOptions options,
         out string message)
     {
         isoPath = _state.DvdIsoPath.Trim();
-        arguments = [];
-        outputSize = 0;
-        samplesPerSector = 0;
+        options = null!;
         if (isoPath.Length == 0)
         {
             message = L.T("请先选择生成的 DVD ISO（导出页生成后自动填入）。");
@@ -1421,36 +1418,27 @@ public partial class LivePreviewViewModel : ObservableObject
                 throw new ArgumentOutOfRangeException(L.T("半径"), L.T("内半径必须小于外半径。"));
             }
 
-            outputSize = Math.Clamp(
+            int outputSize = Math.Clamp(
                 ParameterParser.ParsePositiveInt(_state.DvdPreviewSize, L.T("预览尺寸")),
                 256,
                 MaximumPreviewSize);
-            samplesPerSector = Math.Clamp(
+            int samplesPerSector = Math.Clamp(
                 ParameterParser.ParsePositiveInt(_state.DvdSamplesPerSector, L.T("每扇区采样")),
                 1,
                 16);
 
-            // The simulate command falls back to the ISO's solve sidecar JSON for the
-            // drawing range, so the app only passes the measured calibration geometry.
-            arguments =
-            [
-                "simulate",
-                "--iso", isoPath,
-                "--output", outputPath,
-                "--total-sectors", totalSectorsValue.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                "--inner-radius-mm", innerRadius.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-                "--outer-radius-mm", outerRadius.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-                "--pitch-linear", _state.DvdPitchLinear.Trim(),
-                "--pitch-quadratic", _state.DvdPitchQuadratic.Trim(),
-                "--pitch-cubic", _state.DvdPitchCubic.Trim(),
-                "--spiral-direction", "cw",
-                "--preview-size", outputSize.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                "--samples-per-sector", samplesPerSector.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            ];
+            options = new IsoReadbackOptions(
+                checked((uint)totalSectorsValue), 0, checked((uint)_state.GetUsableSectors(OpticalDiscFamily.Dvd)), 0x30000,
+                innerRadius, outerRadius, DvdStreamingOptions.StandardChannelBitLengthNm, true,
+                outputSize, samplesPerSector,
+                ParameterParser.ParseDouble(_state.DvdPitchLinear, L.T("相对一次项")),
+                ParameterParser.ParseDouble(_state.DvdPitchQuadratic, L.T("相对二次项")),
+                ParameterParser.ParseDouble(_state.DvdPitchCubic, L.T("相对三次项")),
+                PreviewOuterRadiusMm: ReadDvdPreviewGeometry(false).OutputOuterRadiusMm);
             message = string.Empty;
             return true;
         }
-        catch (Exception exception) when (exception is FormatException or OverflowException or ArgumentOutOfRangeException)
+        catch (Exception exception) when (exception is FormatException or OverflowException or ArgumentException)
         {
             message = exception.Message;
             return false;
@@ -1458,24 +1446,19 @@ public partial class LivePreviewViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Calibration variables of the DVD projection. Unlike the read-back path, the command
+    /// Calibration variables of the DVD projection. Unlike the read-back path, the request
     /// carries both radii pairs: the solver lays the picture out at the generated radii and
     /// projects it onto the measured ones. Channel bit (133.3 nm) and start angle (0°) stay
     /// the physical constants of the scheme.
     /// </summary>
-    private bool TryBuildDvdCalibrateCommand(
-        string outputPath,
+    private bool TryBuildDvdCalibrationOptions(
         out string imagePath,
-        out string[] arguments,
-        out int outputSize,
-        out int samplesPerSector,
+        out CalibrationPreviewOptions options,
         out DvdHybridStreamingPlan? filePlan,
         out string message)
     {
         imagePath = _state.DvdImagePath.Trim();
-        arguments = [];
-        outputSize = 0;
-        samplesPerSector = 0;
+        options = null!;
         filePlan = null;
         if (imagePath.Length == 0)
         {
@@ -1506,79 +1489,49 @@ public partial class LivePreviewViewModel : ObservableObject
                 throw new ArgumentOutOfRangeException(L.T("半径"), L.T("内半径必须小于外半径。"));
             }
 
-            outputSize = Math.Clamp(
+            int outputSize = Math.Clamp(
                 ParameterParser.ParsePositiveInt(_state.DvdPreviewSize, L.T("预览尺寸")),
                 256,
                 MaximumPreviewSize);
-            samplesPerSector = Math.Clamp(
+            int samplesPerSector = Math.Clamp(
                 ParameterParser.ParsePositiveInt(_state.DvdSamplesPerSector, L.T("每扇区采样")),
                 1,
                 16);
 
-            string totalSectors = totalSectorsValue.ToString(System.Globalization.CultureInfo.InvariantCulture);
             ToneProfile tone = _state.DvdTone;
             uint drawingStart = 0;
-            uint drawingSectors = checked((uint)totalSectorsValue);
+            uint drawingSectors = checked((uint)_state.GetUsableSectors(OpticalDiscFamily.Dvd));
             string dataDirectory = _state.DvdDataDirectory.Trim();
             if (dataDirectory.Length > 0)
             {
                 DvdStreamingOptions generated = ReadDvdPreviewGeometry(calibration: false);
                 filePlan = DvdStreamingGenerator.PrepareHybrid(dataDirectory, generated,
-                    string.IsNullOrWhiteSpace(_state.DvdVolumeLabel) ? "DISC_IMAGE" : _state.DvdVolumeLabel.Trim(),
+                    _state.ResolveVolumeLabel(OpticalDiscFamily.Dvd),
                     filesAtOuterRing: _state.DvdFilesAtOuterRing);
                 drawingStart = filePlan.DrawingStartLba;
                 drawingSectors = filePlan.DrawingSectors;
             }
-            arguments =
-            [
-                "calibrate",
-                "--image", imagePath,
-                "--output", outputPath,
-                "--total-sectors", totalSectors,
-                "--lba", drawingStart.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                "--fill-sectors", drawingSectors.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                "--generated-inner-radius-mm", generatedInner.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-                "--generated-outer-radius-mm", generatedOuter.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-                "--actual-inner-radius-mm", actualInner.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-                "--actual-outer-radius-mm", actualOuter.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-                "--pitch-linear", _state.DvdPitchLinear.Trim(),
-                "--pitch-quadratic", _state.DvdPitchQuadratic.Trim(),
-                "--pitch-cubic", _state.DvdPitchCubic.Trim(),
-                "--actual-pitch-linear", _state.DvdActualPitchLinear.Trim(),
-                "--actual-pitch-quadratic", _state.DvdActualPitchQuadratic.Trim(),
-                "--actual-pitch-cubic", _state.DvdActualPitchCubic.Trim(),
-                "--spiral-direction", "cw",
-                "--image-threshold", "128",
-                "--alpha-threshold", "1",
-                "--tone-dither", tone.DitherStrength.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-                "--tone-levels", "2",
-                "--tone-brightness", tone.Brightness.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-                "--tone-gamma", tone.SrgbLinearization.ToString().ToLowerInvariant(),
-                "--preview-size", outputSize.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                "--samples-per-sector", samplesPerSector.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            ];
+            options = new CalibrationPreviewOptions(
+                checked((uint)totalSectorsValue), drawingStart, drawingSectors,
+                generatedInner, generatedOuter, actualInner, actualOuter,
+                DvdStreamingOptions.StandardChannelBitLengthNm, true, 128, 1, outputSize, samplesPerSector,
+                ParameterParser.ParseDouble(_state.DvdPitchLinear, L.T("相对一次项")),
+                ParameterParser.ParseDouble(_state.DvdPitchQuadratic, L.T("相对二次项")),
+                ParameterParser.ParseDouble(_state.DvdPitchCubic, L.T("相对三次项")),
+                ParameterParser.ParseDouble(_state.DvdActualPitchLinear, L.T("相对一次项")),
+                ParameterParser.ParseDouble(_state.DvdActualPitchQuadratic, L.T("相对二次项")),
+                ParameterParser.ParseDouble(_state.DvdActualPitchCubic, L.T("相对三次项")), tone,
+                SourceImageOuterRadiusMm: ReadDvdPreviewGeometry(false).OutputOuterRadiusMm,
+                PreviewOuterRadiusMm: ReadDvdPreviewGeometry(true).OutputOuterRadiusMm);
             message = string.Empty;
             return true;
         }
         catch (Exception exception) when (exception is FormatException or OverflowException
                                               or ArgumentException or IOException or UnauthorizedAccessException)
         {
+            _shell.AppendLog(JobDiagnostics.FormatLog("DVD projection parameters · " + imagePath, exception));
             message = exception.Message;
             return false;
-        }
-    }
-
-    private static void TryDeleteFile(string path)
-    {
-        try
-        {
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
-        }
-        catch (IOException)
-        {
         }
     }
 
@@ -1625,7 +1578,7 @@ public partial class LivePreviewViewModel : ObservableObject
         catch (Exception exception)
         {
             ResultPreviewPlaceholderText = L.T("图片已生成，但无法在界面中加载。");
-            _shell.AppendLog(L.F($"[{DateTime.Now:HH:mm:ss}] 预览加载失败：{exception.Message}\n"));
+            _shell.AppendLog(JobDiagnostics.FormatLog(L.T("图片已生成，但无法在界面中加载。") + " · " + outputPath, exception));
             return false;
         }
     }
@@ -1674,7 +1627,7 @@ public partial class LivePreviewViewModel : ObservableObject
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             _shell.ShowToast(L.T("导出失败"), exception.Message, ToastKind.Error);
-            _shell.AppendLog(L.F($"[{DateTime.Now:HH:mm:ss}] 预览导出失败：{exception.Message}\n"));
+            _shell.AppendLog(JobDiagnostics.FormatLog(L.T("导出失败") + " · " + destination, exception));
             return;
         }
 

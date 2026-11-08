@@ -24,7 +24,9 @@ public sealed record CalibrationPreviewOptions(
     double ActualPitchLinear = 0,
     double ActualPitchQuadratic = 0,
     double ActualPitchCubic = 0,
-    ToneProfile? Tone = null);
+    ToneProfile? Tone = null,
+    double? SourceImageOuterRadiusMm = null,
+    double? PreviewOuterRadiusMm = null);
 
 public sealed record CalibrationPreviewSummary(
     string SourceImage,
@@ -74,6 +76,7 @@ public static class CalibrationPreviewRenderer
         CalibrationPreviewOptions options,
         CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         Validate(options);
         string sourceFullPath = Path.GetFullPath(imagePath);
         string outputFullPath = Path.GetFullPath(outputPath);
@@ -103,7 +106,8 @@ public static class CalibrationPreviewRenderer
         int[] weightedLevelSums = new int[checked(size * size)];
         int[] alphaSums = new int[checked(size * size)];
         double centre = (size - 1) / 2.0;
-        double millimetresPerPixel = (2 * options.ActualOuterRadiusMm) / (size - 1);
+        double previewOuterRadius = options.PreviewOuterRadiusMm ?? options.ActualOuterRadiusMm;
+        double millimetresPerPixel = (2 * previewOuterRadius) / (size - 1);
         double direction = options.Clockwise ? -1.0 : 1.0;
         const double fullTurn = 2 * Math.PI;
         double visibleStartMm = options.StartLba
@@ -127,7 +131,8 @@ public static class CalibrationPreviewRenderer
         double firstGlobalChannelBit = options.StartLba
             * (double)DvdEccBlockEncoder.ChannelBitsPerSector;
         int workerCount = Environment.ProcessorCount;
-        Parallel.For(0, workerCount, worker =>
+        ParallelOptions parallelOptions = new() { CancellationToken = cancellationToken };
+        Parallel.For(0, workerCount, parallelOptions, worker =>
         {
             for (long sampleIndex = worker, iteration = 0;
                  sampleIndex < totalSamples;
@@ -146,7 +151,7 @@ public static class CalibrationPreviewRenderer
                 PixelSample sample = source.SampleDisc(
                     generatedRadiusMm * Math.Cos(generatedPolarAngle),
                     generatedRadiusMm * Math.Sin(generatedPolarAngle),
-                    generated.OuterRadiusMm,
+                    options.SourceImageOuterRadiusMm ?? generated.OuterRadiusMm,
                     preserveDiscreteGrayscale: true);
                 if (sample.Alpha < options.AlphaThreshold)
                 {
@@ -155,7 +160,7 @@ public static class CalibrationPreviewRenderer
 
                 (double actualRadiusMm, double actualTrackAngle) = actual.AtArcLengthFast(arcLengthMm);
                 double actualPolarAngle = direction * actualTrackAngle;
-                double pixelRadius = centre * actualRadiusMm / actual.OuterRadiusMm;
+                double pixelRadius = centre * actualRadiusMm / previewOuterRadius;
                 int pixelX = (int)Math.Round(
                     centre + (pixelRadius * Math.Cos(actualPolarAngle)));
                 int pixelY = (int)Math.Round(
@@ -181,7 +186,7 @@ public static class CalibrationPreviewRenderer
         });
 
         cancellationToken.ThrowIfCancellationRequested();
-        Parallel.For(0, size, pixelY =>
+        Parallel.For(0, size, parallelOptions, pixelY =>
         {
             double yMm = (centre - pixelY) * millimetresPerPixel;
             int rowOffset = pixelY * stride;
@@ -210,6 +215,7 @@ public static class CalibrationPreviewRenderer
             }
         });
 
+        cancellationToken.ThrowIfCancellationRequested();
         WritePng(outputFullPath, size, pixels);
         return new CalibrationPreviewSummary(
             sourceFullPath,

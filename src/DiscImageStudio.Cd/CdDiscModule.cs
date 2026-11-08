@@ -12,7 +12,8 @@ public sealed class CdDiscModule : IOpticalDiscModule
     [
         new("r0", "Inner radius", DiscOptionValueType.Decimal, DefaultValue: "24.5", Unit: "mm"),
         new("r1", "Outer radius", DiscOptionValueType.Decimal, DefaultValue: "56.8", Unit: "mm"),
-        new("sectors", "Program sectors", DiscOptionValueType.Integer, DefaultValue: "359849"),
+        new("sectors", "Geometry sectors", DiscOptionValueType.Integer, DefaultValue: "359849"),
+        new("usable-sectors", "Output sectors within the geometry", DiscOptionValueType.Integer),
         new("velocity", "Linear velocity", DiscOptionValueType.Decimal, DefaultValue: "1200", Unit: "mm/s"),
         new("theta0", "Start angle", DiscOptionValueType.Decimal, DefaultValue: "0", Unit: "degrees"),
         new("outer", "Image outer radius", DiscOptionValueType.Decimal, DefaultValue: "57.5", Unit: "mm"),
@@ -126,45 +127,18 @@ public sealed class CdDiscModule : IOpticalDiscModule
         IProgress<DiscJobProgress>? progress,
         CancellationToken cancellationToken)
     {
-        string output = options.Require("output");
-        string dataDirectory = options.GetString("data-dir", string.Empty).Trim();
-        bool outer = ReadFilePosition(options);
-        if (dataDirectory.Length > 0)
-        {
-            CdDiscParameters parameters = ReadParameters(options);
-            CdDataLayoutPlan plan = CdDataImageGenerator.PrepareLayout(dataDirectory, parameters,
-                options.GetString("volume-label", "CD_IMAGE"), outer);
-            CdGenerationSummary dataSummary = CdDataImageGenerator.Generate(options.Require("input"),
-                output, parameters, plan,
-                value => progress?.Report(new DiscJobProgress(ModuleId, "generate",
-                    $"CD data progress {value.Fraction:P1}", value.Fraction, value.CompletedBytes,
-                    value.TotalBytes, value.Elapsed)), cancellationToken, ReadTone(options));
-            return new DiscJobResult(ModuleId, request.Command, 0,
-                $"CD data image complete: {plan.FileCount} files, {plan.TotalSectors} sectors, "
-                + $"files={(outer ? "outer" : "inner")}, output={dataSummary.OutputTrack}", dataSummary.OutputTrack);
-        }
-        CdGenerationSummary summary = CdTrackGenerator.Generate(
+        CdImageRequest image = new(
             options.Require("input"),
-            output,
+            options.Require("output"),
             ReadParameters(options),
+            ReadTone(options),
             options.GetBoolean("interleave", true),
             options.GetBoolean("cue", true),
-            value => progress?.Report(new DiscJobProgress(
-                ModuleId,
-                "generate",
-                $"CD progress {value.Fraction:P1}",
-                value.Fraction,
-                value.CompletedBytes,
-                value.TotalBytes,
-                value.Elapsed)),
-            cancellationToken,
-            ReadTone(options));
-        string message =
-            $"CD track complete: {summary.Sectors} sectors, {summary.BytesWritten} bytes, "
-            + $"interleave={summary.Interleaved}, elapsed={summary.Elapsed.TotalSeconds:F1}s, "
-            + $"output={summary.OutputTrack}"
-            + (summary.CueSheetPath is null ? string.Empty : $", cue={summary.CueSheetPath}");
-        return new DiscJobResult(ModuleId, request.Command, 0, message, summary.OutputTrack);
+            options.GetString("data-dir", string.Empty),
+            options.GetString("volume-label", "CD_IMAGE"),
+            ReadFilePosition(options));
+        DiscImageResult result = CdImageGenerator.Generate(image, progress, cancellationToken);
+        return new DiscJobResult(ModuleId, request.Command, 0, result.Summary, result.OutputPath);
     }
 
     private static DiscJobResult PreviewWarp(
@@ -251,7 +225,10 @@ public sealed class CdDiscModule : IOpticalDiscModule
             options.GetDouble("outer", fallback?.ImageOuterRadiusMm ?? CdDiscParameters.StandardImageOuterRadiusMm),
             options.GetDouble("pitch-linear", fallback?.PitchLinear ?? 0),
             options.GetDouble("pitch-quadratic", fallback?.PitchQuadratic ?? 0),
-            options.GetDouble("pitch-cubic", fallback?.PitchCubic ?? 0));
+            options.GetDouble("pitch-cubic", fallback?.PitchCubic ?? 0),
+            options.Contains("usable-sectors") ? options.GetLong("usable-sectors", 0)
+                : options.Contains("sectors") ? null : fallback?.UsableSectors,
+            options.Contains("sectors") || options.Contains("usable-sectors") ? null : fallback?.SourceImageOuterRadiusMm);
     }
 
     private static bool ReadFilePosition(CdCommandOptions options)
@@ -331,6 +308,8 @@ public sealed class CdDiscModule : IOpticalDiscModule
 
             return new CdCommandOptions(values);
         }
+
+        internal bool Contains(string key) => _values.ContainsKey(key);
 
         internal string Require(string key)
             => _values.TryGetValue(key, out string? value)

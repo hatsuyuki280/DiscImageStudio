@@ -6,9 +6,11 @@
 
 ```mermaid
 flowchart LR
-    GUI[Windows WPF GUI / CLI] --> Imaging[DiscImageStudio.Imaging]
-    Imaging --> Catalog[DiscModuleCatalog]
-    CLI[Linux / macOS CLI] --> Catalog
+    GUI[Windows WPF GUI] --> Imaging[DiscImageStudio.Imaging]
+    GUI --> CD[DiscImageStudio.Cd]
+    GUI --> DVD[DiscImageStudio.Dvd]
+    GUI --> BD[DiscImageStudio.BluRay]
+    CLI[Windows / Linux / macOS CLI] --> Catalog[DiscModuleCatalog]
     GUI --> Burning[DiscImageStudio.Burning]
     Burning --> IMAPI[Windows IMAPI2]
     Catalog --> Contract[IOpticalDiscModule]
@@ -21,7 +23,7 @@ flowchart LR
     BD --> Iso[DiscImageStudio.Iso / UDF 2.01]
 ```
 
-`DiscImageStudio.Cli` 和 Windows 桌面程序从同一份模块目录执行离线命令。`DiscImageStudio.ImageIO` 在 Windows 桌面目标使用 WIC，在通用 `net10.0` 目标使用 StbImageSharp 读图、StbImageWriteSharp 写 PNG。两个后端都向生成器提供相同顺序的 BGRA 像素。蓝光共用透明度合成和灰度转换代码，CD 和 DVD 也分别共用各自原有的采样算法。
+`DiscImageStudio.Cli` 和 Windows 桌面程序的命令行入口从同一份模块目录执行离线命令。GUI 导出直接构造 `CdImageRequest`、`DvdImageRequest` 或 `BluRayImageRequest` 并调用相应生成器，返回不含退出码的 `DiscImageResult`；DVD 预览直接调用类型化渲染器。内部调用通过进度对象和取消令牌协作，异常原样传至界面，命令行解析与控制台输出只在 CLI 适配边界发生。`DiscImageStudio.ImageIO` 在 Windows 桌面目标使用 WIC，在通用 `net10.0` 目标使用 StbImageSharp 读图、StbImageWriteSharp 写 PNG。两个后端都向生成器提供相同顺序的 BGRA 像素。蓝光共用透明度合成和灰度转换代码，CD 和 DVD 也分别共用各自原有的采样算法。
 
 ## Core 契约
 
@@ -32,11 +34,14 @@ flowchart LR
 - `DiscCommandDescriptor`：命令、能力和选项定义，可供未来动态生成界面。
 - `DiscJobRequest`：统一命令与参数载体。
 - `DiscJobProgress`：介质无关的进度、阶段、完成量和耗时。
-- `DiscJobResult`：退出码、摘要和输出路径。
+- `DiscJobResult`：CLI 命令适配结果（退出码、摘要和输出路径）。
+- `DiscImageResult`：内部文件生成结果（输出路径、摘要）；失败使用异常传播。
 - `DiscModuleCatalog`：命令路由、重复命令检查和模块执行。
 - `ToneProfile` / `ToneDither`：CD/DVD/BD 共用的影调模型（抖动强度、灰阶档位、亮度、sRGB 线性化）与确定性抖动相位。CD/DVD 在逻辑字节索引上抖动，因此 CD 延迟交织后仍可在预览中复现；BD 在源图分辨率一次性量化，生成、刻录与预览共用同一张二值栅格。
 
 `OpticalDiscFamily` 的三种取值（`CompactDisc`/`Dvd`/`BluRay`）都已实现；工程、预设、设计、预览、导出、刻录与标定都按这三种盘型分支。
+
+盘片预设新增可选 `usableSectors`，与原 `sectors`／`totalSectors` 分离。总数仍决定几何曲线和物理位置；可用数决定输出长度、文件系统容量及画面有效外径。显式值直接使用；旧预设／工程缺字段时 CD 回退为总数减 2，DVD 保守回退为总数减 608 后向下对齐 16，BD 向下对齐 32。内置预设均给出可用数，已按可用量标定的威宝 DVD-R 及 DVD+R 不重复扣减。DVD 几何总数允许非 16 倍数，只有输出上限必须对齐。
 
 盘片预设由 Core 的统一 `disc-presets.json`（schema 4）承载：`cdPresets`、`dvdPresets`、`bluRayPresets` 三组，各有独立的禁用列表。读取 schema 2/3 的旧文件时补入内置 BD 模板并在下一次保存时升级。
 
@@ -63,12 +68,12 @@ flowchart LR
 参数归属与渐进披露：
 
 - **生成几何**（r0、r1、扇区、DVD 三项轨距）只在工程设置对话框里编辑。其他工作区显示只读摘要（`GeometrySummary`）和「编辑…」直达按钮，不再各自提供一份编辑器。
-- **盘片预设**是生成几何的快捷入口，归属同一处：新建工程经左侧模板列表选择（列出目录中全部非手动预设）。工程设置对话框不再展示盘型与预设选择——盘型随工程固定，参数区底部提供「将此套参数保存为预设」，把当前字段追加进用户预设 JSON（弹出独立窗口确认名称，保存后目录即时刷新）。
+- **盘片预设**是生成几何的快捷入口，归属同一处：新建工程经左侧模板列表选择（列出目录中全部非手动预设）。工程设置的盘型固定，可切换该盘型的预设；「将此套参数保存为预设」把当前字段追加进用户预设 JSON，保存成功后立即应用到工程并按新 ID 选中，同步高级预览实测几何。后续取消窗口不撤销已保存的参数，但不会应用之后尚未确认的字段编辑；新建工程保存预设不改动原工程。
 - **交付参数按目的地分家**：导出工作区只管写文件（输出路径、CUE、交织、ISO/数据文件夹/卷标），刻录工作区只管写盘（写入内容、刻录机与速度）。两者消费同一张导出质量合成图，文件验证过的素材就是写入盘片的素材；刻录的 CD/DVD 由来源推导（工程盘型或标定图案盘型），没有可以拨到错误一侧的开关。刻录页的「写入内容」分段控件是页面级来源选择（与预览页「设计投影 / 成品读回」同一模式）：选工程合成图时直接给出来源摘要，选辅助标定图案时链接到标定工作区；来源选择不再嵌套在目的地开关内部。
 - **影调**是生成参数，归设计工作区右栏：抖动强度（0–100%，新工程 75%）、sRGB 线性化（伽马）、CD 的灰阶档位（2/4 级；DVD/BD 固定 2 级）与亮度（±64）写进工程 `tone` 节，生成、流式刻录、读回与标定投影共用同一个 `ToneProfile`。BD 另有 3T/6T 极性开关，数据上是独立的 `bluRay.invertMapping`，不塞进 `ToneProfile`。模块内的盘面预览用同一映射投影当前合成图，拖动滑块即时更新；导出页只保留输出选项并提示影调在设计页，预览页不重复编辑。
-- **预览专属参数**（实测半径、导出尺寸、每扇区采样）留在预览页，因为它们是检视行为而非工程参数。打开工程时实测几何先跟随工程几何，设计投影因此默认中性；用户填入实测值后才显示两套几何的偏差，只有标定流程会主动改写它们。
+- **预览专属参数**（实测半径、导出尺寸、每扇区采样）留在预览页，因为它们是检视行为而非工程参数。打开工程、应用盘片预设或确认工程几何修改时，实测半径与三项轨距系数同步为工程几何，设计投影因此默认中性；用户仍可手填实测值检视偏差。仅修改工程名不重置实测值，预览尺寸与采样精度也不会随预设重置。
 
-设计工作区（`DesignViewModel` + `DiscDesignCanvas` + `DesignComposer`）维护图层栈：图层按面板顺序存储（顶部索引 0，画布自下而上绘制，与合成顺序一致），画布以盘心为原点的毫米坐标系渲染并支持拖动/角点缩放/旋转柄；图层行是可选中列表，与画布及属性面板双向同步。图层编辑经 450 ms 防抖后由 `DesignComposer` 渲染出方形合成图（预览 2048 px，导出 8192 px）：方形中心即盘心，边长对应 2 × 画布外半径（CD 固定 57.5 mm，DVD/BD 为生成外半径）。合成图写入 State 的源图片路径，成为导出与预览的共同输入；生成 CLI 与管线对此无感知。导出与刻录两条交付路径都使用导出质量的 8192 px 合成图，因此预览验证的素材就是写入盘片的素材。页眉的「下一步」贯穿 设计 → 预览 → 导出 → 刻录，标定经侧边栏或刻录页的链接进入。
+设计工作区（`DesignViewModel` + `DiscDesignCanvas` + `DesignComposer`）维护图层栈：图层按面板顺序存储（顶部索引 0，画布自下而上绘制，与合成顺序一致），画布以盘心为原点的毫米坐标系渲染并支持拖动/角点缩放/旋转柄；图层行是可选中列表，与画布及属性面板双向同步。图层编辑经 450 ms 防抖后由 `DesignComposer` 渲染出方形合成图（预览 2048 px，导出 8192 px）：方形中心即盘心，边长对应 2 × 可用区域的物理外半径；此半径由原几何在可用扇区末端的位置求得。生成器的图像采样使用同一尺度，避免输出缩短时丢失画面外缘。旧底层调用未指定可用数时仍保留原图像尺度。合成图写入 State 的源图片路径，成为导出与预览的共同输入；生成 CLI 与管线对此无感知。导出与刻录两条交付路径都使用导出质量的 8192 px 合成图，因此预览验证的素材就是写入盘片的素材。页眉的「下一步」贯穿 设计 → 预览 → 导出 → 刻录，标定经侧边栏或刻录页的链接进入。
 
 设计语言集中在 `Themes/Tokens.xaml`（颜色、语义色、圆角含 `RadiusChip`/`RadiusPanel`/卡片头尾镜像弧、控件高度、`SidePanelWidth`、页面留白、浮层阴影、画布调色板）与 `Themes/Controls.xaml`（文字层级、按钮族、输入控件、列表行、披露面板、`DangerCard` 警示卡、监视器与步骤卡模板）。代码侧动画统一走 `Controls/Motion.cs` 的三档时长，自定义画布统一通过 `Controls/DiscTheme.cs` 与 `Controls/DiscRenderCore.cs` 取色与绘制盘体，不再各自内置一套调色板。`Controls.xaml` 内基于隐式样式的派生样式（`BasedOn="{StaticResource {x:Type X}}"`）必须写在隐式样式之后：前向引用不会报错，而是静默回退到 Windows 自带样式，控件会以浅色系统外观出现。需要承载页面命名内容的面板（如 `MonitorCard`）做成模板化自定义控件而不是 UserControl：UserControl 会把内容隔离进自己的名称范围，页面里 `x:Name` 的元素无法编译，快照钩子与画布接线也因此够不到它们。
 
@@ -84,13 +89,23 @@ flowchart LR
 
 CD 的 `OpticalBurnRequest.ProduceContent` 明确要求无头的 44.1 kHz、16 位、双声道小端 PCM，`ContentLength` 只计音频数据。CD 生成器的默认无头流保留旧大端输出，调用 IMAPI 时由外壳显式选择 `CdAudioByteOrder.LittleEndian`；转换在延迟交织完成后的整扇区输出处进行。文件生成根据 `.wav` / `.raw` 后缀选择格式：WAV 使用同样的小端音频数据，额外写入 44 字节 RIFF 头和同名 WAVE CUE；旧 RAW 保持大端。Windows RAW 镜像构造器实测原样保留传入字节，不负责修正字节序。详见 [CD 刻录兼容说明](CD_AUDIO_COMPATIBILITY.md)。
 
+`IOpticalDiscBurner.GetMediaCapacityAsync` 同时返回几何容量和当前可写容量。生成前按预设可用数与设备可写数的较小值确定本次输出并向下对齐；画面尺度仍使用预设可用区域，设备容量较小时只截尾，文件布局则重新规划，布局完成后仍在写前重新检查介质状态与容量；设备 Free 不再扣固定预留。DVD 使用 IMAPI Free，CD 用 ATIP 几何减 2 的保守单轨上限并在 DAO 准备后严格检查 lead-out（移除原有 3 扇区隐式 overburn 容差），BD 保留全新未格式化 SRM、无备用区的完整布局检查。标定“从盘片读取”分别填入几何与对齐后的可用数；已录盘仍可读取几何，但无可写容量时可用字段留空并明确提示缺省估算。
+
 `DiscImageStudio.Burning` 只负责 Windows IMAPI2 设备枚举、介质检查、COM `IStream` 适配、64 MiB 有界内存缓冲（开刻前预填充 32 MiB）和刻录生命周期。自动速度会在真正开始 CD/DVD 刻录时重新读取当前盘片的写入配置并选择最低值，手动选择仍保持原值；设备不报告速度时使用刻录接口的保守回退。CD/DVD 生成器仍拥有介质格式：CD 顺序产生 2352 字节音频扇区，DVD 快速算法顺序产生 2048 字节数据扇区。刻录器按需读取这些块，因此磁盘上不出现完整镜像。原文件输出入口不经过该层，失败时不会破坏原工作流。
 
 DVD 混合文件夹模式采用两阶段顺序生成：第一阶段扫描目录，确定 ISO9660/Joliet 元数据、文件 extent 及绘图起止 LBA；第二阶段按规划的盘面顺序输出，内圈模式为“元数据 → 文件 → 图案”，外圈模式为“元数据 → 图案 → 文件”。图案按 16 扇区 ECC Block 对齐。布局计划只保存元数据，不缓存文件内容，支持不可 Seek 的流。
 
 BD-R 复用同一刻录契约：`BluRayIsoGenerator` 在一个前向流里写入 UDF 2.01、图案区与盘尾备份元数据；外圈模式将完整文件分区移至尾部备份区前，图案始终保持 32 扇区对齐且位于分区之外。刻录页把该流直接喂给 MMC 顺序写入会话，不落盘完整 25 GB 镜像。BD 不提供备用区重映射；中断后盘片通常不可继续写入。
 
+CD、DVD 和 BD 共用 `BurnDeviceDiagnostics` 的写前环境、固件及物理盘片类型／空白状态日志。物理类型按 IMAPI 返回值记录（如 DVD-R、DVD+R DL、BD-R、BD-RE），不由工程预设或光驱名称推断；识别类型不代表新增对该类型的写入支持。可选字段读取失败只记 `unavailable`，不阻止刻录。
+
+DVD 的 `IDvdDataSession` 隔离现有 COM 调用，保留介质检查、缓冲保护、封盘设置、关闭校验、速度、事件订阅和写入顺序。诊断缓存 `MediaState`、`FreeSectors`、`RequiredSectors`、容量余量、请求／实际速度、设置及阶段耗时。BD 使用原有写前 `ReadMedia` 结果记录 profile、空白／格式化状态、轨道起点与容量、下一可写地址及有效性；另记录写入、刷新、关闭轨道、封盘和释放耗时。
+
+失败时在源流销毁与设备清理前保存 `Burn.DeviceContext`、对应介质的 `Burn.CdDaoContext`／`Burn.DvdContext`／`Burn.BluRayContext` 及 `Burn.ContentAtFailure`。上下文只使用已缓存的设备信息、现有事件和主机流计数，不再查询故障设备。生成量、源流读取量及主机队列量不等于实际落盘量；IMAPI 系统缓冲也不等于光驱物理缓存。CD／DVD 高层接口不暴露失败命令的 SCSI sense，日志明确标记不可用；BD MMC 异常已有的真实 sense 保持原样。CD 导入区事件节流与字段说明见 [CD 失败日志](CD_AUDIO_COMPATIBILITY.md#cd-dao-失败日志)。
+
 `ProjectOutputs.FilesAtOuterRing` 为可选字段，默认 `false`，DVD/BD 各自通过共享参数状态同步导出、预览与刻录。文件区在 GUI 预览中按绘图起止边界标黄，包含必要的文件系统保留区；该配色不进入生成器。已有成品依赖其 sidecar 的固定范围，不使用当前目录重新猜测布局。
+
+设计页影调预览统一为 512×512，CD/DVD/BD 都以透明度表示记录环之外和中心孔，控件直接显示完整位图。CD 将预览输出坐标的外半径设为可用区域外半径；显式可用数的源图采样使用相同尺度，旧底层调用保留原有 57.5 mm 比例。影调预览复用各介质的文件布局计划与 GUI 主题蓝色覆盖层，包含内外圈文件及文件系统保留区；文件夹、卷标和位置变化会刷新。布局扫描与渲染在后台执行，每个影调模块同一时刻只运行一项，取消及版本检查阻止旧结果覆盖新参数，失败时清除过期图像。
 
 ## 模块边界
 

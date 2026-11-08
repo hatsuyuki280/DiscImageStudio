@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.Intrinsics;
+using DiscImageStudio.Core;
 using DiscImageStudio.Core.Calibration;
 using DvdImageSolver.Encoding;
 
@@ -29,17 +30,19 @@ public sealed record FastDvdStreamSummary(
     uint SectorsWritten,
     long BytesWritten,
     long ControlledWords,
-    TimeSpan Elapsed);
+    TimeSpan Elapsed,
+    long CompatibilityChanges = 0);
 
-internal sealed record FastDispersionWriteResult(
+public sealed record FastDispersionWriteResult(
     int CompletedBlocks,
     uint FilledSectors,
     long ControlledWords,
     TimeSpan Elapsed,
     bool SparseIso,
-    uint IsoSectors);
+    uint IsoSectors,
+    long CompatibilityChanges = 0);
 
-internal sealed record FastDispersionProgress(
+public sealed record FastDispersionProgress(
     int CompletedBlocks,
     int TotalBlocks,
     uint BlockLba,
@@ -54,8 +57,10 @@ public static class FastDispersionImageWriter
         string imagePath,
         string isoOutputPath,
         MultiBlockSolveOptions options,
-        Action<FastDispersionProgress>? progress)
+        Action<FastDispersionProgress>? progress,
+        CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         Validate(options);
         RasterImage image = RasterImage.Load(imagePath);
         PayloadImageSampler sampler = new(image, options.ImageMapping);
@@ -64,9 +69,10 @@ public static class FastDispersionImageWriter
             ? Environment.ProcessorCount
             : options.FastParallelism;
         uint isoSectors = options.PreserveExistingIso
-            ? options.ImageMapping.TotalSectors
+            ? options.ImageMapping.OutputSectors
             : checked(options.StartLba + options.FillSectors);
         long controlledWords = 0;
+        long compatibilityChanges = 0;
         Stopwatch stopwatch = Stopwatch.StartNew();
         using RawIsoImageWriter iso = new(
             isoOutputPath,
@@ -75,24 +81,28 @@ public static class FastDispersionImageWriter
         ParallelOptions parallelOptions = new()
         {
             MaxDegreeOfParallelism = parallelism,
+            CancellationToken = cancellationToken,
         };
         int batchCapacity = Math.Min(totalBlocks, Math.Max(1, checked(parallelism * 2)));
         GeneratedBlock[] generated = CreateBatchBuffers(batchCapacity);
         for (int batchStart = 0; batchStart < totalBlocks; batchStart += batchCapacity)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             int batchCount = Math.Min(batchCapacity, totalBlocks - batchStart);
             Parallel.For(0, batchCount, parallelOptions, batchOffset =>
             {
                 int blockIndex = batchStart + batchOffset;
                 generated[batchOffset] = GenerateBlock(
-                    blockIndex, sampler, options, generated[batchOffset].Payloads);
+                    blockIndex, sampler, options, generated[batchOffset].Payloads, cancellationToken);
             });
 
             for (int batchOffset = 0; batchOffset < batchCount; batchOffset++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 GeneratedBlock block = generated[batchOffset];
                 iso.WriteBlock(block.Lba, block.Payloads);
                 controlledWords += block.ControlledWords;
+                compatibilityChanges += block.CompatibilityChanges;
                 int completedBlocks = batchStart + batchOffset + 1;
                 progress?.Invoke(new FastDispersionProgress(
                     completedBlocks,
@@ -103,6 +113,7 @@ public static class FastDispersionImageWriter
             }
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         bool sparseIso = iso.SparseFile;
         iso.Dispose();
         stopwatch.Stop();
@@ -112,7 +123,8 @@ public static class FastDispersionImageWriter
             controlledWords,
             stopwatch.Elapsed,
             sparseIso,
-            isoSectors);
+            isoSectors,
+            compatibilityChanges);
     }
 
     public static FastDvdStreamSummary WriteStream(
@@ -195,6 +207,9 @@ public static class FastDispersionImageWriter
     {
         ArgumentNullException.ThrowIfNull(sampleScrambledByte);
         ValidateStream(output, options);
+        if (options.ReadCompatibility)
+            throw new ArgumentException(
+                "Read compatibility cannot be used with an exact scrambled-byte pattern.", nameof(options));
         PayloadImageSampler sampler = new(
             sampleScrambledByte, options.ImageMapping, samplesScrambledBytes: true);
         return WriteSampledStream(sampler, output, options, progress, cancellationToken);
@@ -236,15 +251,23 @@ public static class FastDispersionImageWriter
         GeneratedBlock Fill(int index, byte[] buffer)
         {
             uint lba = checked(options.StartLba + (uint)index * DvdEccBlockEncoder.SectorCount);
+            int compatibilityChanges = 0;
+            Span<byte> ownership = options.ReadCompatibility
+                ? stackalloc byte[DvdEccBlockEncoder.PayloadBytesPerSector] : Span<byte>.Empty;
+            ownership.Fill(1);
             for (uint offset = 0; offset < DvdEccBlockEncoder.SectorCount; offset++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 uint sector = lba + offset;
                 var payload = buffer.AsSpan((int)offset * DvdEccBlockEncoder.PayloadBytesPerSector,
                     DvdEccBlockEncoder.PayloadBytesPerSector);
                 payload.Fill(DvdGrayscalePalette.GetScrambledByte(sectorLuminance(sector)));
                 DvdDataFrameBuilder.TransformPayloadScrambling(payload, sector + options.PsnOffset);
+                if (options.ReadCompatibility)
+                    compatibilityChanges += ApplyReadCompatibility(payload,
+                        DvdDataFrameBuilder.PayloadScramblerMask(sector + options.PsnOffset), ownership, options);
             }
-            return new GeneratedBlock(lba, buffer, buffer.Length);
+            return new GeneratedBlock(lba, buffer, buffer.Length, compatibilityChanges);
         }
         return WriteBlockStream(Fill, output, options, progress, cancellationToken);
     }
@@ -270,6 +293,7 @@ public static class FastDispersionImageWriter
         long totalBytes = checked((long)options.FillSectors * DvdEccBlockEncoder.PayloadBytesPerSector);
         long bytesWritten = 0;
         long controlledWords = 0;
+        long compatibilityChanges = 0;
         Stopwatch stopwatch = Stopwatch.StartNew();
         for (int batchStart = 0; batchStart < totalBlocks; batchStart += batchCapacity)
         {
@@ -288,6 +312,7 @@ public static class FastDispersionImageWriter
                 output.Write(block.Payloads);
                 bytesWritten = checked(bytesWritten + block.Payloads.Length);
                 controlledWords += block.ControlledWords;
+                compatibilityChanges += block.CompatibilityChanges;
                 int completedBlocks = batchStart + batchOffset + 1;
                 progress?.Invoke(new FastDvdStreamProgress(
                     completedBlocks,
@@ -306,7 +331,8 @@ public static class FastDispersionImageWriter
             options.FillSectors,
             bytesWritten,
             controlledWords,
-            stopwatch.Elapsed);
+            stopwatch.Elapsed,
+            compatibilityChanges);
     }
 
     private static GeneratedBlock[] CreateBatchBuffers(int count)
@@ -342,6 +368,9 @@ public static class FastDispersionImageWriter
         }
 
         int controlledWords = 0;
+        int compatibilityChanges = 0;
+        Span<byte> ownership = options.ReadCompatibility
+            ? stackalloc byte[DvdEccBlockEncoder.PayloadBytesPerSector] : Span<byte>.Empty;
         ulong blockFirstGlobalBit = (ulong)lba * DvdEccBlockEncoder.ChannelBitsPerSector;
         uint firstPsn = checked(lba + options.PsnOffset);
         bool useSimd = options.UseSimdSampling && sampler.SupportsSimdSampling;
@@ -355,6 +384,7 @@ public static class FastDispersionImageWriter
         for (int sector = 0; sector < DvdEccBlockEncoder.SectorCount; sector++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            ownership.Clear();
             int payloadOffset = sector * DvdEccBlockEncoder.PayloadBytesPerSector;
             Span<byte> sectorPayload = payloads.AsSpan(
                 payloadOffset,
@@ -387,6 +417,7 @@ public static class FastDispersionImageWriter
                         if (sample.Alpha >= options.ImageMapping.AlphaThreshold)
                         {
                             sectorPayload[byteIndex] = (byte)(sample.ScrambledByte ^ scrambler[byteIndex]);
+                            if (options.ReadCompatibility) ownership[byteIndex] = 1;
                             controlledWords++;
                         }
                         if (reuseMisses >= 8)
@@ -419,6 +450,7 @@ public static class FastDispersionImageWriter
                             PayloadTarget sample = samples[lane];
                             if (sample.Alpha < options.ImageMapping.AlphaThreshold) continue;
                             sectorPayload[byteIndex + lane] = (byte)(sample.ScrambledByte ^ scrambler[byteIndex + lane]);
+                            if (options.ReadCompatibility) ownership[byteIndex + lane] = 1;
                             controlledWords++;
                         }
                     }
@@ -431,13 +463,22 @@ public static class FastDispersionImageWriter
                         toneIndexBase + byteIndex);
                     if (sample.Alpha < options.ImageMapping.AlphaThreshold) continue;
                     sectorPayload[byteIndex] = (byte)(sample.ScrambledByte ^ scrambler[byteIndex]);
+                    if (options.ReadCompatibility) ownership[byteIndex] = 1;
                     controlledWords++;
                 }
             }
+            if (options.ReadCompatibility)
+                compatibilityChanges += ApplyReadCompatibility(sectorPayload, scrambler, ownership, options);
         }
 
-        return new GeneratedBlock(lba, payloads, controlledWords);
+        return new GeneratedBlock(lba, payloads, controlledWords, compatibilityChanges);
     }
+
+    private static int ApplyReadCompatibility(Span<byte> payload, ReadOnlySpan<byte> mask,
+        ReadOnlySpan<byte> ownership, MultiBlockSolveOptions options)
+        => options.ReadCompatibilityMode == DvdReadCompatibilityModes.LegacyBridge
+            ? DvdReadCompatibilityGuard.ApplyLegacySector(payload, mask, ownership)
+            : DvdReadCompatibilityGuard.ApplySector(payload, mask, ownership);
 
     private static int[] BuildPayloadChannelCenters()
     {
@@ -451,8 +492,11 @@ public static class FastDispersionImageWriter
         return centers;
     }
 
-    private static void Validate(MultiBlockSolveOptions options)
+    internal static void Validate(MultiBlockSolveOptions options)
     {
+        ArgumentNullException.ThrowIfNull(options);
+        if (options.ReadCompatibility && !DvdReadCompatibilityModes.IsSupported(options.ReadCompatibilityMode))
+            throw new ArgumentException("Unsupported DVD read compatibility recipe.", nameof(options));
         if (options.Algorithm != SolverAlgorithm.Dispersion)
         {
             throw new ArgumentException("Fast output requires --algorithm dispersion.");
@@ -473,7 +517,13 @@ public static class FastDispersionImageWriter
                 "Fast output sector count must be a positive multiple of 16.");
         }
 
-        if ((ulong)options.StartLba + options.FillSectors > options.ImageMapping.TotalSectors)
+        if (options.ImageMapping.OutputSectors == 0
+            || options.ImageMapping.OutputSectors > options.ImageMapping.TotalSectors
+            || !double.IsFinite(options.ImageMapping.SamplingOuterRadiusMm)
+            || options.ImageMapping.SamplingOuterRadiusMm <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options), "Output capacity and image radius must lie inside the disc geometry.");
+
+        if ((ulong)options.StartLba + options.FillSectors > options.ImageMapping.OutputSectors)
         {
             throw new ArgumentOutOfRangeException(nameof(options), "Filled range exceeds the disc size.");
         }
@@ -494,7 +544,8 @@ public static class FastDispersionImageWriter
     private readonly record struct GeneratedBlock(
         uint Lba,
         byte[] Payloads,
-        int ControlledWords);
+        int ControlledWords,
+        int CompatibilityChanges = 0);
 
     private readonly record struct PayloadTarget(byte ScrambledByte, byte Alpha);
 
@@ -592,7 +643,7 @@ public static class FastDispersionImageWriter
             if (_referenceImage is not null)
                 stable = _referenceImage.TryGetStableRegion(x, y, out sample, out region);
             else
-                stable = _image!.TryGetStableRegion(x, y, _options.OuterRadiusMm,
+                stable = _image!.TryGetStableRegion(x, y, _options.SamplingOuterRadiusMm,
                     preserveDiscreteGrayscale: true, out sample, out region);
             reusableUntil = globalChannelBit;
             if (!stable)
@@ -627,7 +678,7 @@ public static class FastDispersionImageWriter
 
         private PixelSample SampleRasterPoint(double x, double y) => _referenceImage is not null
             ? _referenceImage.SampleDisc(x, y)
-            : _image!.SampleDisc(x, y, _options.OuterRadiusMm, preserveDiscreteGrayscale: true);
+            : _image!.SampleDisc(x, y, _options.SamplingOuterRadiusMm, preserveDiscreteGrayscale: true);
 
         internal PayloadTarget SampleGlobalChannelBit(ulong globalChannelBit, long toneIndex)
         {
@@ -712,7 +763,7 @@ public static class FastDispersionImageWriter
             for (int lane = 0; lane < 4; lane++)
             {
                 if (_image.TrySampleBinaryDisc(x.GetElement(lane), y.GetElement(lane),
-                    _options.OuterRadiusMm, out PixelSample sample))
+                    _options.SamplingOuterRadiusMm, out PixelSample sample))
                     samples[lane] = new PayloadTarget(
                         ScrambledForLuminance(sample.Luminance, toneIndexBase + lane), sample.Alpha);
                 else

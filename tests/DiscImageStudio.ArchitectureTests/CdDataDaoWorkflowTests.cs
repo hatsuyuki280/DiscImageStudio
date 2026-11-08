@@ -21,7 +21,7 @@ internal static class CdDataDaoWorkflowTests
         using GeneratedContentComStream content = new(2048, (output, _) => output.Write(new byte[2048]),
             null, CancellationToken.None);
         content.WaitUntilPrebuffered(CancellationToken.None);
-        foreach (long remaining in new[] { sectors, sectors - 2, sectors - 3 })
+        foreach (long remaining in new[] { sectors, sectors + 2, sectors + 3 })
         {
             RecordingCdRawSession session = new() { LastLeadoutSector = remaining };
             using RecordingCdRawImageSession image = new(session.Calls) { ImageStartOfLeadout = sectors };
@@ -37,21 +37,34 @@ internal static class CdDataDaoWorkflowTests
                 "capacity handling preserves all ISO sectors and the preset's lead-out");
             Require(operations.Contains("构造 CD DAO 数据轨") && operations.Contains("写入 CD DAO 数据轨"),
                 "data DAO is identified in diagnostics");
+            Require(session.RequestedSectorType == CdRawSectorType.SubcodeIsCooked
+                && image.ImageSectorType == CdRawSectorType.SubcodeIsCooked,
+                "data DAO keeps cooked R-W when the recorder does not list raw P-W");
         }
-        RecordingCdRawSession tooSmall = new() { LastLeadoutSector = sectors - 4 };
-        using RecordingCdRawImageSession tooLarge = new(tooSmall.Calls) { ImageStartOfLeadout = sectors };
-        try
+        RecordingCdRawSession rawCapable = new() { LastLeadoutSector = sectors, ReportedSectorTypes = [1, 2, 3] };
+        using RecordingCdRawImageSession rawImage = new(rawCapable.Calls) { ImageStartOfLeadout = sectors };
+        WindowsImapiBurner.BurnCdDao(rawCapable, rawImage, content, request, CancellationToken.None);
+        Require(rawCapable.RequestedSectorType == CdRawSectorType.SubcodeIsRaw
+            && rawImage.ImageSectorType == CdRawSectorType.SubcodeIsRaw
+            && rawCapable.Calls[^1] == "ReleaseMedia",
+            "data DAO requests raw P-W and builds the matching template when the recorder lists it");
+        foreach (int excess in new[] { 1, 2, 3, 4 })
         {
-            WindowsImapiBurner.BurnCdDao(tooSmall, tooLarge, content, request, CancellationToken.None);
-            throw new InvalidOperationException("Expected excessive overburn to be rejected.");
+            RecordingCdRawSession tooSmall = new() { LastLeadoutSector = sectors - excess };
+            using RecordingCdRawImageSession tooLarge = new(tooSmall.Calls) { ImageStartOfLeadout = sectors };
+            try
+            {
+                WindowsImapiBurner.BurnCdDao(tooSmall, tooLarge, content, request, CancellationToken.None);
+                throw new InvalidOperationException("Expected any excess over the DAO boundary to be rejected.");
+            }
+            catch (InvalidOperationException exception)
+            {
+                Require(exception.Message.Contains($"超出盘片边界 {excess} 个扇区")
+                    && !tooSmall.Calls.Contains("WriteMedia") && tooSmall.Calls[^1] == "ReleaseMedia",
+                    "data DAO refuses even a one-sector excess and releases the prepared medium");
+            }
         }
-        catch (InvalidOperationException exception)
-        {
-            Require(exception.Message.Contains("超出盘片边界 4 个扇区")
-                && !tooSmall.Calls.Contains("WriteMedia") && tooSmall.Calls[^1] == "ReleaseMedia",
-                "data DAO retains the existing strict three-sector overburn bound and cleanup");
-        }
-        Console.WriteLine("cd-data-dao-workflow: passed (Ritek 359845 sectors, shared audio DAO capacity/cleanup, unchanged ISO length; mock recorder only)");
+        Console.WriteLine("cd-data-dao-workflow: passed (Ritek 359845 sectors, shared audio DAO capacity/cleanup, unchanged ISO length, raw P-W preferred over cooked R-W; mock recorder only)");
     }
 
     private static void Require(bool condition, string message)

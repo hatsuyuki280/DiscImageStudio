@@ -1,3 +1,4 @@
+using DvdImageSolver.Solver;
 using System.IO;
 using System.Reflection;
 using System.Runtime.ExceptionServices;
@@ -14,7 +15,7 @@ using DiscImageStudio.ViewModels;
 
 internal static class FilePlacementPreviewTests
 {
-    private static readonly Color Yellow = Color.FromRgb(250, 204, 21);
+    private static readonly Color Blue = Color.FromRgb(51, 133, 255);
     private static readonly DateTimeOffset Timestamp = new(2026, 10, 26, 0, 0, 0, TimeSpan.Zero);
 
     internal static void Run()
@@ -29,7 +30,7 @@ internal static class FilePlacementPreviewTests
         thread.Start();
         thread.Join();
         if (error is not null) ExceptionDispatchInfo.Capture(error).Throw();
-        Console.WriteLine("file-placement-preview: passed (inner/outer projection and readback, exact cubic bounds, yellow file regions, missing metadata, invalid folders, stale state)");
+        Console.WriteLine("file-placement-preview: passed (inner/outer projection and readback, exact cubic bounds, blue file regions, missing metadata, invalid folders, stale state)");
     }
 
     private static void RunOnSta()
@@ -51,6 +52,7 @@ internal static class FilePlacementPreviewTests
 
             shell = new ShellViewModel(Dispatcher.CurrentDispatcher);
             VerifyCdPreview(shell, directory, source, files);
+            VerifyLegacyCdAudioMetadata(shell, directory, source);
             VerifyDvdPreview(shell, directory, source, files);
             VerifyBluRayPreview(shell, directory, source, files);
 
@@ -89,6 +91,7 @@ internal static class FilePlacementPreviewTests
         preview.IsCalibrationPreview = true;
         state.CdImagePath = source;
         state.CdSectors = "256";
+        state.CdUsableSectors = "256";
         state.CdInnerRadius = state.CdActualInnerRadius = "24.5";
         state.CdOuterRadius = state.CdActualOuterRadius = "56.8";
         state.CdPreviewSize = "256";
@@ -109,9 +112,9 @@ internal static class FilePlacementPreviewTests
                 : plan.DrawingStartLba) * CdDiscParameters.BytesPerSector / 2);
             Color SampleCd(double radius)
                 => Sample(projection, (int)Math.Round(projection.PixelWidth / 2.0
-                    + radius * projection.PixelWidth / (2 * disc.ImageOuterRadiusMm)), projection.PixelHeight / 2);
-            Require(SampleCd(fileRadius) == Yellow, "CD overlay follows CD image radius and pixel centre");
-            Require(SampleCd(drawingMiddle) != Yellow, "CD drawing retains its physical range");
+                    + radius * projection.PixelWidth / (2 * disc.OuterRadiusMm)), projection.PixelHeight / 2);
+            Require(SampleCd(fileRadius) == Blue, "CD overlay follows the explicit usable canvas and pixel centre");
+            Require(SampleCd(drawingMiddle) != Blue, "CD drawing retains its physical range");
 
             string iso = Path.Combine(directory, $"cd-{outer}.iso");
             CdDataImageGenerator.Generate(source, iso, disc, plan);
@@ -155,16 +158,59 @@ internal static class FilePlacementPreviewTests
             "missing CD folder cannot silently show audio projection");
         state.CdDataDirectory = files;
         state.CdSectors = "32";
+        state.CdUsableSectors = "32";
         RunPreview(preview);
         Require(!preview.HasFileRegionOverlay && !preview.StatusText.StartsWith("已实时更新"),
             "CD capacity failure does not fall back to full-disc drawing");
         state.CdSectors = "256";
+        state.CdUsableSectors = "256";
         preview.IsCalibrationPreview = false;
         File.WriteAllText(state.CdTrackPath + ".json", "invalid sidecar");
         RunPreview(preview);
         RequirePreview(preview, false, "CD ISO readback without valid layout metadata");
         state.CdTrackPath = Path.Combine(directory, "audio.wav");
         Require(preview.Inspector.IsCdAudioArtifact, "CD audio readback restores interleave controls");
+    }
+
+    private static void VerifyLegacyCdAudioMetadata(ShellViewModel shell, string directory, string source)
+    {
+        CdDiscParameters legacy = new(24.5, 56.8, 256,
+            LinearVelocityMmPerSecond: 1300, StartAngleRadians: .7, ImageOuterRadiusMm: 61);
+        string track = Path.Combine(directory, "legacy-audio.raw");
+        CdTrackGenerator.Generate(source, track, legacy, interleave: false);
+        Dictionary<string, JsonElement> json = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+            File.ReadAllText(track + ".json"))!;
+        json.Remove("usableSectors");
+        json.Remove("sourceImageOuterRadiusMm");
+        File.WriteAllText(track + ".json", JsonSerializer.Serialize(json));
+
+        DiscParametersState state = shell.State;
+        LivePreviewViewModel preview = shell.LivePreview;
+        preview.SelectedFamily = OpticalDiscFamily.CompactDisc;
+        preview.IsCalibrationPreview = false;
+        state.CdPreviewSize = "256";
+        state.CdSamplesPerSector = "2";
+        state.CdTrackPath = track;
+        Require(state.CdUsableSectors == "256", "legacy metadata adopts the full recorded length");
+        // A user may still adjust the physical readback geometry after adoption.
+        state.CdInnerRadius = "25";
+        RunPreview(preview);
+        RequirePreview(preview, false, "legacy CD audio readback");
+        string expected = Path.Combine(directory, "legacy-audio-expected.png");
+        CdTrackGenerator.PreviewTrack(track, expected, legacy with { InnerRadiusMm = 25 },
+            256, CdDiscParameters.BytesPerSector / 2, deinterleave: false);
+        Require(Pixels(preview.ResultImage!).SequenceEqual(Pixels(ReadPng(expected))),
+            "old audio metadata keeps its nullable limit and original canvas while allowing measured radii");
+
+        state.CdUsableSectors = "257";
+        RunPreview(preview);
+        Require(!preview.StatusText.StartsWith("已实时更新"), "invalid readback usable count is a parameter message");
+        state.CdDataDirectory = string.Empty;
+        state.CdImagePath = source;
+        preview.IsCalibrationPreview = true;
+        RunPreview(preview);
+        Require(!preview.StatusText.StartsWith("已实时更新"), "invalid projection usable count is a parameter message");
+        state.CdUsableSectors = "256";
     }
 
     private static void VerifyDvdPreview(ShellViewModel shell, string directory, string source, string files)
@@ -175,6 +221,7 @@ internal static class FilePlacementPreviewTests
         preview.IsCalibrationPreview = true;
         state.DvdImagePath = source;
         state.DvdTotalSectors = "256";
+        state.DvdUsableSectors = "256";
         state.DvdInnerRadius = state.DvdActualInnerRadius = "24";
         state.DvdOuterRadius = state.DvdActualOuterRadius = "58";
         state.DvdPitchLinear = state.DvdActualPitchLinear = "0";
@@ -191,12 +238,12 @@ internal static class FilePlacementPreviewTests
             RunPreview(preview);
             RequirePreview(preview, true, $"DVD {(outer ? "outer" : "inner")} design projection");
             DvdHybridStreamingPlan plan = DvdStreamingGenerator.PrepareHybrid(files, disc, filesAtOuterRing: outer);
-            object?[] arguments = [Path.Combine(directory, "command.png"), null, null, 0, 0, null, null];
-            Require((bool)Invoke(preview, "TryBuildDvdCalibrateCommand", arguments)!, "DVD projection command builds");
-            string[] command = (string[])arguments[2]!;
-            Require(Argument(command, "--lba") == plan.DrawingStartLba.ToString()
-                && Argument(command, "--fill-sectors") == plan.DrawingSectors.ToString()
-                && Argument(command, "--total-sectors") == "256",
+            object?[] arguments = [null, null, null, null];
+            Require((bool)Invoke(preview, "TryBuildDvdCalibrationOptions", arguments)!, "DVD projection options build");
+            CalibrationPreviewOptions options = (CalibrationPreviewOptions)arguments[1]!;
+            Require(options.StartLba == plan.DrawingStartLba
+                && options.FillSectors == plan.DrawingSectors
+                && options.TotalSectors == 256,
                 "DVD projection limits the drawing range while preserving full-disc geometry");
 
             string iso = Path.Combine(directory, $"dvd-{outer}.iso");
@@ -220,10 +267,12 @@ internal static class FilePlacementPreviewTests
             "missing DVD folder reports failure instead of falling back to a full-disc drawing");
         state.DvdDataDirectory = files;
         state.DvdTotalSectors = "32";
+        state.DvdUsableSectors = "32";
         RunPreview(preview);
         Require(!preview.HasFileRegionOverlay && !preview.StatusText.StartsWith("已实时更新"),
             "DVD capacity failure does not fall back to full-disc drawing");
         state.DvdTotalSectors = "256";
+        state.DvdUsableSectors = "256";
         preview.IsCalibrationPreview = false;
         File.WriteAllText(state.DvdIsoPath + ".json", "invalid sidecar");
         RunPreview(preview);
@@ -238,6 +287,7 @@ internal static class FilePlacementPreviewTests
         preview.IsCalibrationPreview = true;
         state.BdImagePath = source;
         state.BdTotalSectors = "1024";
+        state.BdUsableSectors = "1024";
         state.BdInnerRadius = state.BdActualInnerRadius = "24";
         state.BdOuterRadius = state.BdActualOuterRadius = "58";
         state.BdPreviewSize = "128";
@@ -275,10 +325,12 @@ internal static class FilePlacementPreviewTests
             "missing BD folder reports failure instead of falling back to full-disc drawing");
         state.BdDataDirectory = files;
         state.BdTotalSectors = "512";
+        state.BdUsableSectors = "512";
         RunPreview(preview);
         Require(!preview.HasFileRegionOverlay && !preview.StatusText.StartsWith("已实时更新"),
             "BD capacity failure does not fall back to full-disc drawing");
         state.BdTotalSectors = "1024";
+        state.BdUsableSectors = "1024";
         preview.IsCalibrationPreview = false;
         File.WriteAllText(state.BdIsoPath + ".json", "invalid sidecar");
         RunPreview(preview);
@@ -296,17 +348,17 @@ internal static class FilePlacementPreviewTests
         Require(Math.Abs(exact - areaEstimate) > 1, "cubic test separates exact geometry from area approximation");
         FileRegionPreviewOverlay.ApplyDvd(path, actual, 2048, 4096);
         BitmapSource bitmap = ReadPng(path);
-        Require(SampleRadius(bitmap, 24 + .5, dvd: true) == Yellow, "DVD inner file area is yellow");
+        Require(SampleRadius(bitmap, 24 + .5, dvd: true) == Blue, "DVD inner file area is blue");
         Require(SampleRadius(bitmap, exact + .5, dvd: true) == Colors.Red, "DVD drawing keeps its original pixels");
         double distinguishingRadius = (exact + areaEstimate) / 2;
-        Require(SampleRadius(bitmap, distinguishingRadius, dvd: true) == (distinguishingRadius < exact ? Yellow : Colors.Red),
+        Require(SampleRadius(bitmap, distinguishingRadius, dvd: true) == (distinguishingRadius < exact ? Blue : Colors.Red),
             "DVD cubic file boundary uses track arc length rather than disc area");
         Require(Sample(bitmap, 512, 512) == Colors.Red && Sample(bitmap, 0, 0) == Colors.Red,
             "file overlay preserves the centre hole and space outside the disc");
         WritePng(path, 1025, Colors.Red);
         FileRegionPreviewOverlay.ApplyDvd(path, actual, 0, 2048);
         bitmap = ReadPng(path);
-        Require(SampleRadius(bitmap, exact + .5, dvd: true) == Yellow
+        Require(SampleRadius(bitmap, exact + .5, dvd: true) == Blue
             && SampleRadius(bitmap, 24 + .5, dvd: true) == Colors.Red,
             "DVD outer file region moves outward without stretching the drawing");
     }
@@ -329,7 +381,7 @@ internal static class FilePlacementPreviewTests
             "BD readback still classifies drawing payload normally");
         FileRegionPreviewOverlay.ApplyBluRay(png, disc, 256, 768);
         BitmapSource after = ReadPng(png);
-        Require(SampleRadius(after, fileRadius, dvd: false) == Yellow
+        Require(SampleRadius(after, fileRadius, dvd: false) == Blue
             && SampleRadius(after, drawingRadius, dvd: false) == Colors.Black,
             "BD readback overlays only occupied regions");
         Require(original.SequenceEqual(File.ReadAllBytes(iso)), "preview coloration never changes burn data");
@@ -365,16 +417,16 @@ internal static class FilePlacementPreviewTests
 
     private static string Argument(string[] arguments, string name) => arguments[Array.IndexOf(arguments, name) + 1];
 
-    private static void RequirePreview(LivePreviewViewModel preview, bool yellow, string context)
+    private static void RequirePreview(LivePreviewViewModel preview, bool hasFileRegion, string context)
     {
         Require(preview.HasResultImage && preview.StatusText.StartsWith("已实时更新"), context + ": " + preview.StatusText);
-        Require(preview.HasFileRegionOverlay == yellow, context + " legend visibility");
+        Require(preview.HasFileRegionOverlay == hasFileRegion, context + " legend visibility");
         BitmapSource bitmap = preview.ResultImage!;
         byte[] pixels = Pixels(bitmap);
-        int yellowPixels = 0;
+        int bluePixels = 0;
         for (int i = 0; i < pixels.Length; i += 4)
-            if (pixels[i] == 21 && pixels[i + 1] == 204 && pixels[i + 2] == 250 && pixels[i + 3] == 255) yellowPixels++;
-        Require(yellow ? yellowPixels > 10 : yellowPixels == 0, context + " rendered yellow file pixels");
+            if (pixels[i] == 0xFF && pixels[i + 1] == 0x85 && pixels[i + 2] == 0x33 && pixels[i + 3] == 0xFF) bluePixels++;
+        Require(hasFileRegion ? bluePixels > 10 : bluePixels == 0, context + " rendered blue file pixels");
     }
 
     private static Color SampleRadius(BitmapSource bitmap, double radius, bool dvd)

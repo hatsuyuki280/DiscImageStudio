@@ -22,6 +22,14 @@ public sealed class CdDataLayoutPlan
     public uint DrawingStartLba { get; }
     public uint DrawingEndLbaExclusive { get; }
     public uint DrawingSectors => DrawingEndLbaExclusive - DrawingStartLba;
+
+    /// <summary>Occupied regions, in LBAs: the filesystem metadata always starts at the
+    /// inner edge, the file data sits at the chosen ring. The designer's data-region guide
+    /// maps both to radii; the dispersion reserve is added by the caller.</summary>
+    public uint MetadataEndLbaExclusive => IsoLayout.MetadataEndLbaExclusive;
+    public uint FileDataStartLba => IsoLayout.FileDataStartLba;
+    public uint DataEndLbaExclusive => IsoLayout.DataEndLbaExclusive;
+
     public bool FilesAtOuterRing => IsoLayout.FilesAtOuterRing;
     public int FileCount => IsoLayout.FileCount;
     public int DirectoryCount => IsoLayout.DirectoryCount;
@@ -46,7 +54,7 @@ public static class CdDataImageGenerator
         ArgumentException.ThrowIfNullOrWhiteSpace(dataDirectory);
         parameters.Validate();
         CdDataLayoutPlan plan = new(Iso9660ImageWriter.Plan(dataDirectory,
-            checked((uint)parameters.Sectors), volumeLabel, filesAtOuterRing: filesAtOuterRing));
+            checked((uint)parameters.OutputSectors), volumeLabel, filesAtOuterRing: filesAtOuterRing));
         if (plan.DrawingStartLba >= plan.DrawingEndLbaExclusive)
             throw new ArgumentException("The filesystem leaves no CD sectors for drawing.", nameof(dataDirectory));
         return plan;
@@ -145,7 +153,7 @@ public static class CdDataImageGenerator
         writer.Flush();
         stopwatch.Stop();
         progress?.Invoke(new CdProgress(writer.CompletedBytes, plan.ContentLength, stopwatch.Elapsed));
-        return new CdGenerationSummary(source, "direct-burn-stream", parameters.Sectors,
+        return new CdGenerationSummary(source, "direct-burn-stream", parameters.OutputSectors,
             writer.CompletedBytes, false, stopwatch.Elapsed);
     }
 
@@ -184,7 +192,7 @@ public static class CdDataImageGenerator
         ArgumentNullException.ThrowIfNull(parameters);
         ArgumentNullException.ThrowIfNull(plan);
         parameters.Validate();
-        if (parameters.Sectors != plan.TotalSectors)
+        if (parameters.OutputSectors != plan.TotalSectors)
             throw new ArgumentException("CD layout and geometry must have the same sector count.", nameof(plan));
     }
 
@@ -237,9 +245,9 @@ public static class CdDataImageGenerator
         if (plan is not null) Validate(generated, plan);
         tone = tone.Normalized();
         CdImageSampler sampler = new(RasterImage.Load(Path.GetFullPath(imagePath)), generated);
-        DataPreview preview = new(outputSize);
+        DataPreview preview = new(outputSize, actual);
         long start = plan?.DrawingStartLba ?? 0;
-        long end = plan?.DrawingEndLbaExclusive ?? generated.Sectors;
+        long end = plan?.DrawingEndLbaExclusive ?? generated.OutputSectors;
         int step = Math.Max(1, BytesPerSector / samplesPerSector);
         for (long lba = start; lba < end; lba++)
         {
@@ -260,15 +268,15 @@ public static class CdDataImageGenerator
         ValidatePreview(actual, outputSize, byteStep);
         using FileStream input = new(isoPath, FileMode.Open, FileAccess.Read, FileShare.Read,
             1024 * 1024, FileOptions.SequentialScan);
-        if (input.Length % BytesPerSector != 0 || input.Length != checked(actual.Sectors * BytesPerSector))
+        if (input.Length % BytesPerSector != 0 || input.Length != checked(actual.OutputSectors * BytesPerSector))
             throw new ArgumentException("CD data ISO length must match the selected 2048-byte sector count.", nameof(isoPath));
         CdDataImageMetadata? metadata = CdDataImageMetadata.TryLoad(isoPath);
-        if (metadata?.Parameters.Sectors != actual.Sectors) metadata = null;
+        if (metadata?.Parameters.OutputSectors != actual.OutputSectors) metadata = null;
         long start = metadata?.DrawingStartLba ?? 0;
-        long end = metadata?.DrawingEndLbaExclusive ?? actual.Sectors;
+        long end = metadata?.DrawingEndLbaExclusive ?? actual.OutputSectors;
         input.Position = start * BytesPerSector;
         byte[] sector = new byte[BytesPerSector];
-        DataPreview preview = new(outputSize);
+        DataPreview preview = new(outputSize, actual);
         for (long lba = start; lba < end; lba++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -290,7 +298,7 @@ public static class CdDataImageGenerator
         if (interval <= 0) throw new ArgumentOutOfRangeException(nameof(interval));
     }
 
-    private sealed class DataPreview(int size)
+    private sealed class DataPreview(int size, CdDiscParameters actual)
     {
         private readonly long[] _sum = new long[checked(size * size)];
         private readonly int[] _count = new int[checked(size * size)];
@@ -313,6 +321,7 @@ public static class CdDataImageGenerator
                 byte gray = (byte)((_sum[index] + _count[index] / 2) / _count[index]);
                 pixels[index * 4] = pixels[index * 4 + 1] = pixels[index * 4 + 2] = gray;
             }
+            CdPreviewMask.Apply(pixels, size, actual);
             string fullPath = Path.GetFullPath(path);
             Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
             RasterCodec.SavePng(fullPath, size, size, pixels, grayscale: false);

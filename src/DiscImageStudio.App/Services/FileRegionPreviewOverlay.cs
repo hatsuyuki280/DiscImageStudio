@@ -16,22 +16,22 @@ internal static class FileRegionPreviewOverlay
         uint drawingStartLba, uint drawingEndLbaExclusive, CancellationToken token = default)
     {
         actual.Validate();
-        ValidateRange(checked((uint)actual.Sectors), drawingStartLba, drawingEndLbaExclusive);
-        Apply(path, actual.InnerRadiusMm, actual.OuterRadiusMm,
+        ValidateRange(checked((uint)actual.OutputSectors), drawingStartLba, drawingEndLbaExclusive);
+        Apply(path, actual.InnerRadiusMm, actual.OutputOuterRadiusMm,
             actual.RadiusFromByte((long)drawingStartLba * CdDiscParameters.BytesPerSector),
             actual.RadiusFromByte((long)drawingEndLbaExclusive * CdDiscParameters.BytesPerSector),
-            dvdPixelCoordinates: false, token, actual.ImageOuterRadiusMm);
+            dvdPixelCoordinates: false, token, actual.PreviewImageOuterRadiusMm);
     }
 
     internal static void ApplyDvd(string path, DvdStreamingOptions actual,
         uint drawingStartLba, uint drawingEndLbaExclusive, CancellationToken token = default)
     {
         actual.Validate();
-        ValidateRange(actual.TotalSectors, drawingStartLba, drawingEndLbaExclusive);
+        ValidateRange(actual.OutputSectors, drawingStartLba, drawingEndLbaExclusive);
         double length = actual.TotalSectors * 38688.0 * actual.ChannelBitLengthNm * 1e-6;
         DvdTrackGeometry geometry = DvdTrackGeometry.Create(actual.InnerRadiusMm,
             actual.OuterRadiusMm, length, actual.PitchLinear, actual.PitchQuadratic, actual.PitchCubic);
-        Apply(path, actual.InnerRadiusMm, actual.OuterRadiusMm,
+        Apply(path, actual.InnerRadiusMm, actual.OutputOuterRadiusMm,
             geometry.RadiusAtArcLength(length * ((double)drawingStartLba / actual.TotalSectors)),
             geometry.RadiusAtArcLength(length * ((double)drawingEndLbaExclusive / actual.TotalSectors)),
             dvdPixelCoordinates: true, token);
@@ -41,9 +41,9 @@ internal static class FileRegionPreviewOverlay
         uint drawingStartSector, uint drawingEndSectorExclusive, CancellationToken token = default)
     {
         actual.Validate();
-        ValidateRange(actual.TotalSectors, drawingStartSector, drawingEndSectorExclusive);
+        ValidateRange(actual.OutputSectors, drawingStartSector, drawingEndSectorExclusive);
         BluRayTrackGeometry geometry = new(actual);
-        Apply(path, actual.InnerRadiusMm, actual.OuterRadiusMm,
+        Apply(path, actual.InnerRadiusMm, actual.OutputOuterRadiusMm,
             geometry.AtSector(drawingStartSector).RadiusMm,
             geometry.AtSector(drawingEndSectorExclusive).RadiusMm,
             dvdPixelCoordinates: false, token);
@@ -92,12 +92,12 @@ internal static class FileRegionPreviewOverlay
                     || radiusSquared >= drawingInnerSquared && radiusSquared < drawingOuterSquared)
                     continue;
                 int offset = y * stride + x * 4;
-                // #FACC15, matching the preview legend. File data is deliberately not
-                // passed through the black/white pattern classifier.
-                pixels[offset] = 21;
-                pixels[offset + 1] = 204;
-                pixels[offset + 2] = 250;
-                pixels[offset + 3] = 255;
+                // Theme blue #3385FF, matching the preview legend and the design guide.
+                // File data is deliberately not passed through the black/white classifier.
+                pixels[offset] = 0xFF;
+                pixels[offset + 1] = 0x85;
+                pixels[offset + 2] = 0x33;
+                pixels[offset + 3] = 0xFF;
             }
         }
         token.ThrowIfCancellationRequested();
